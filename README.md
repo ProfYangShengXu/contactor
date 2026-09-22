@@ -191,6 +191,31 @@ description : 命令行兜底 agent（无流式 / 无中断 / 无会话复用）
 
 ---
 
+## 给 agent 用（不是给人用）
+
+**这个项目是给 agent 当工具用的，所以它自带一份 `SKILL.md`。**
+
+没有它，桥就是个「只有人知道怎么敲」的服务 —— agent 既不知道它在，
+也不知道它能派活。装上这份 skill，agent 才知道先 `agents/list` 发现谁在、
+再看名片上的 `capabilities` 决定能不能把活交给它。
+
+```markdown
+### Hermes Agent
+cp SKILL.md ~/AppData/Local/hermes/skills/<category>/contactor/
+
+### Claude Code
+cp SKILL.md .claude/skills/contactor/
+
+### dsh (DeepSeek Harness)
+mkdir -p ~/.dsh/skills/contactor && cp SKILL.md ~/.dsh/skills/contactor/
+> dsh 的 frontmatter 只认 name + description，本仓的 SKILL.md 已只带这两个
+```
+
+`SKILL.md` 里写了 agent 真正需要的四步：**先看桥在不在 → 发现谁在（读名片）→
+派活（带幂等键）→ 需要放行时怎么答**，以及六个「别做的事」。
+
+---
+
 ## 接口
 
 JSON-RPC 2.0 over HTTP，单一端点 `POST /`。
