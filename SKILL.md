@@ -1,6 +1,6 @@
 ---
 name: contactor
-description: 要把活派给本机另一个 agent、或想让别的 agent 帮你看一眼时用。先查 agents/list 发现谁在，再 send 委托。
+description: 把活派给本机另一个 agent 时用。先 agents/list 发现谁在，再 send 委托。
 metadata:
   trigger: 派活给别的 agent、委托、让 dsh 做、让别的 agent 看、本机 agent、agent 互通、contactor、a2a、多 agent
 ---
