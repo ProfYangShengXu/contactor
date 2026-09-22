@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# 工具缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 凭据与本地配置
+#   ★ config.yaml 是本机私有的（写死了路径、agent 名单），进仓的是 config.example.yaml
+config.yaml
+.env
+*.env
+!.env.example
+
+# 运行期产物
+*.log
+*.db
+*.db-journal
+*.db-wal

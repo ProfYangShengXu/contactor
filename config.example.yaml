@@ -1,0 +1,44 @@
+# contactor 配置示例
+#   cp config.example.yaml config.yaml   然后改成本机的真实路径
+#
+# ★ 唯一允许出现 agent 名字字面量的地方。
+#   其它所有文件都不该知道 "dsh" 或 "hermes" 是谁。
+
+bind_host: 127.0.0.1        # 只回环。别改成 0.0.0.0 —— 本项目没有鉴权
+bind_port: 8791
+self_name: contactor
+
+# 委托链深度上限（回环防护的第二道防线）
+max_delegation_depth: 3
+
+# 从被驱动进程的 stdout 里连续读到多少行非协议内容就熔断该任务
+acp_noise_limit: 50
+
+agents:
+
+  # ── 会讲 ACP 的 agent：一个 backend 类覆盖全部 ───────────────
+  dsh:
+    kind: acp
+    # WSL 里的 agent：command 是 Windows 侧启动它的命令
+    command: ["wsl", "-d", "Ubuntu", "-u", "root", "--", "bash", "-lc",
+              "cd /root/code/deepseek-harness && exec pnpm dsh --profile acp"]
+    # ⚠️ workspace 必须是【被包装 agent 所在操作系统】的路径。
+    #    dsh 跑在 WSL 里 → 给 Linux 路径；给 Windows 路径会得到
+    #    -32602 "cwd must be an absolute path"
+    workspace: "/root/code/deepseek-harness"
+
+  hermes:
+    kind: acp
+    command: ["C:\\path\\to\\hermes-agent\\.venv\\Scripts\\python.exe",
+              "-m", "acp_adapter.entry"]
+    cwd: "C:\\path\\to\\hermes-agent"
+    workspace: "C:\\Users\\you"
+
+  # ── 不会讲 ACP 的 agent：兜底路径（二等公民）──────────────────
+  hermes_cli:
+    kind: subprocess_cli
+    command: ["C:\\path\\to\\hermes-agent\\.venv\\Scripts\\hermes.exe"]
+    prompt_via: arg                    # stdin（默认）或 arg
+    prompt_flag: ["-z"]                # arg 模式：插在 prompt 前面的固定参数
+    cwd: "C:\\Users\\you"
+    timeout_s: 300
