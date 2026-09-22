@@ -62,8 +62,12 @@ grok-build 也支持 ACP
 ```bash
 pip install -e ".[dev]"
 cp config.example.yaml config.yaml     # 改成你本机的 agent 启动命令
-python -m contactor.cli -c config.yaml serve
+contactor up                           # 已在跑就直接用，没跑就自己起一个
 ```
+
+`up` 是幂等的：先查 `/health`，通了直接用，没通就 **detach 起一个**。
+**这是给 agent 用的** —— 起桥是纯机械步骤，不该卡在等人上。
+`contactor down` 停掉它。
 
 另开一个终端：
 

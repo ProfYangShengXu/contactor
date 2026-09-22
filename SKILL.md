@@ -19,14 +19,30 @@ metadata:
 
 ---
 
-## 第 0 步：桥活着吗
+## 第 0 步：确保桥在跑（★ 你自己就能起）
 
 ```bash
-curl -s --max-time 5 http://127.0.0.1:8791/health
-# → {"ok":true,"agents":["dsh","hermes","hermes_cli"]}
+contactor up          # 已在跑 → 直接返回；没跑 → 自己起一个
+# → 桥已在运行 http://127.0.0.1:8791
+#   agents: dsh, hermes, hermes_cli
 ```
 
-**不通** → 桥没起。问用户，或（如果知道配置在哪）`contactor -c <config.yaml> serve`。
+**`up` 是幂等的，随便调。** 它先查 `/health`：
+- 通了 → 直接用（**这是常态，一个桥就够，不要起第二个**）
+- 没通 → **detach 起一个**（脱离当前进程，所以它活得过你这次工具调用）
+- 起不来 → 打印日志尾部，这时候才去问用户
+
+```bash
+contactor down        # 停掉（只有你自己起的那个才停得掉）
+```
+
+**为什么可以自己起**：起桥是纯机械步骤，没有需要人判断的地方。
+把它路由给人，等于让整个能力被一个人工动作卡住。
+
+**真正的约束只有一条**：桥必须 detach 起 —— 调用方进程一结束，
+它起的子进程会跟着被收走。`up` 已经处理了这件事，所以**别自己用
+`subprocess` / `&` 起 `serve`**，那样起来的桥会立刻死。
+
 **不要**自己猜别的端口、也不要以为能直接调某个 agent。
 
 ---
@@ -37,6 +53,7 @@ curl -s --max-time 5 http://127.0.0.1:8791/health
 
 ```bash
 contactor agents          # 所有人 + 每张名片（含 capabilities）
+contactor card <agent>    # 单个名片
 ```
 
 或直接走协议：
@@ -172,8 +189,9 @@ agents/card           {agent} → {card}      ← 连接前先读这个
 
 | 现象 | 处置 |
 |---|---|
-| `/health` 不通 | 桥没起。问用户，别猜 |
+| `/health` 不通 | 先 `contactor up`。**起不来**才问用户 |
 | `没有这个 agent：xxx（现有：[...]）` | 用返回的现有列表挑一个 |
+| `up` 后还是不通 | 看 `%LOCALAPPDATA%\contactor\serve.log`；多半是 config.yaml 里某个 agent 的启动命令不对 |
 | 任务停在 `input-required` 很久 | 你在等它，它在等你 —— `contactor answer` |
 | 一直不出结果 | 查 `contactor get <id>` 看状态；可能已经在 `input-required` 了 |
 | `放行请求已失效` | 桥重启过，重新发起任务 |

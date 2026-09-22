@@ -18,7 +18,7 @@
   contactor get <taskId>                  查任务
 """
 from __future__ import annotations
-import argparse, asyncio, json, sys, time, uuid
+import argparse, asyncio, io, json, os, subprocess, sys, time, uuid
 import httpx
 
 
@@ -46,6 +46,13 @@ def main(argv=None) -> int:
     ap.add_argument("-c", "--config", default=None)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("serve")
+
+    p = sub.add_parser("up", help="★ 确保桥在跑：已在跑就直接用，没跑就 detach 起一个")
+    p.add_argument("--timeout", type=float, default=45, help="等健康检查通过的上限秒数")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("down", help="停掉由 up 起来的桥")
+    p.add_argument("--timeout", type=float, default=10)
 
     p = sub.add_parser("agents", help="列出本机 agent + 每张名片")
     p.add_argument("--json", action="store_true")
@@ -79,6 +86,12 @@ def main(argv=None) -> int:
         srv = build(cfg, logger=lambda m: print(m, file=sys.stderr, flush=True))
         asyncio.run(srv.serve())
         return 0
+
+    if args.cmd == "up":
+        return _up(args, cfg, url)
+    if args.cmd == "down":
+        _down.cfg_path = args.config
+        return _down(url, args.timeout)
 
     if args.cmd == "agents":
         r = _rpc(url, "agents/list", {})
@@ -129,6 +142,117 @@ def main(argv=None) -> int:
         print(json.dumps(r.get("result") or r.get("error"), ensure_ascii=False, indent=2))
         return 0
     return 1
+
+
+# ── 桥的启停 ────────────────────────────────────────────────
+#  ★ 为什么必须 detach：
+#    调用方的进程（agent 的一次工具调用 / shell）一结束，
+#    它起的子进程会跟着被收走 —— 桥必须活过那次调用。
+#  ★ 为什么先查健康再起：
+#    一个桥就够了。多个 agent 各自起一个 = N 个桥抢同一个端口，
+#    而且互相看不见。判据是「先发现，再补位」，不是「先起再说」。
+
+def _state_dir(cfg) -> str:
+    d = os.path.dirname(os.path.abspath(cfg.db_path)) or "."
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _health(url: str, timeout: float = 3) -> dict | None:
+    try:
+        r = httpx.get(url + "health", timeout=timeout)
+        return r.json() if r.status_code == 200 else None
+    except Exception:
+        return None
+
+
+def _up(args, cfg, url) -> int:
+    # 1) 已经在跑 → 直接用（这才是常态）
+    h = _health(url)
+    if h:
+        if args.json:
+            print(json.dumps({"started": False, "health": h}, ensure_ascii=False)); return 0
+        print(f"桥已在运行 http://{cfg.bind_host}:{cfg.bind_port}")
+        print("  agents: " + ", ".join(h.get("agents", []) or ["（无）"]))
+        return 0
+
+    # 2) 没跑 → detach 起一个
+    sd = _state_dir(cfg)
+    log_path = os.path.join(sd, "serve.log")
+    pid_path = os.path.join(sd, "serve.pid")
+    argv = [sys.executable, "-m", "contactor.cli"]
+    if args.config:
+        argv += ["-c", os.path.abspath(args.config)]
+    argv += ["serve"]
+
+    flags = 0
+    if os.name == "nt":
+        flags = (getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
+    log = open(log_path, "ab", buffering=0)
+    try:
+        proc = subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+            creationflags=flags, start_new_session=(os.name != "nt"), close_fds=True)
+    except Exception as e:
+        print(f"起桥失败：{e}", file=sys.stderr); return 2
+    finally:
+        log.close()
+    with open(pid_path, "w", encoding="utf-8") as f:
+        f.write(str(proc.pid) + "\n")
+
+    # 3) 等健康检查通过
+    end = time.time() + args.timeout
+    while time.time() < end:
+        time.sleep(0.4)
+        h = _health(url)
+        if h:
+            if args.json:
+                print(json.dumps({"started": True, "pid": proc.pid, "health": h},
+                                 ensure_ascii=False)); return 0
+            print(f"桥已起来 http://{cfg.bind_host}:{cfg.bind_port}  (pid {proc.pid})")
+            print("  agents: " + ", ".join(h.get("agents", []) or ["（无）"]))
+            print(f"  日志：{log_path}")
+            return 0
+        if proc.poll() is not None:
+            break                                   # 子进程自己退了，别再等
+    print(f"桥起来后 {args.timeout}s 内健康检查没通", file=sys.stderr)
+    print(f"  看日志：{log_path}", file=sys.stderr)
+    try:
+        tail = io.open(log_path, encoding="utf-8", errors="replace").read()[-800:]
+        if tail.strip(): print("  --- 日志尾部 ---\n" + tail, file=sys.stderr)
+    except Exception:
+        pass
+    return 5
+
+
+def _down(url: str, timeout: float) -> int:
+    from .config import Config
+    cfg = Config.load(_down.cfg_path) if getattr(_down, "cfg_path", None) else None
+    pid_path = None
+    if cfg:
+        pid_path = os.path.join(_state_dir(cfg), "serve.pid")
+    if not pid_path or not os.path.exists(pid_path):
+        print("找不到 pid 文件（桥可能是别的方式起的，自己停）", file=sys.stderr); return 1
+    try:
+        pid = int(io.open(pid_path, encoding="utf-8").read().strip())
+    except Exception as e:
+        print(f"pid 文件读不了：{e}", file=sys.stderr); return 1
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                           capture_output=True, timeout=timeout)
+        else:
+            os.kill(pid, 15)
+    except Exception as e:
+        print(f"停不了 pid {pid}：{e}", file=sys.stderr); return 1
+    end = time.time() + timeout
+    while time.time() < end:
+        if not _health(url, 2):
+            os.remove(pid_path)
+            print(f"桥已停 (pid {pid})"); return 0
+        time.sleep(0.3)
+    print(f"pid {pid} 发出停止信号后仍能响应", file=sys.stderr); return 5
 
 
 def _stream(url: str, params: dict, wait: float) -> int:
