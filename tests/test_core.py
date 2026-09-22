@@ -45,8 +45,8 @@ async def wait_state(store, tid, state, timeout=5):
 async def test_normal_task(tmp_path):
     d, store, _, _ = make(tmp_path, {"a": "ok"})
     t = await d.submit("a", "hello")
-    await wait_state(store, t.task_id, TaskState.COMPLETED)
-    got = await store.get(t.task_id)
+    await wait_state(store, t.taskId, TaskState.COMPLETED)
+    got = await store.get(t.taskId)
     assert got.artifacts[0].parts[0].text == "done: hello"
 
 
@@ -54,10 +54,10 @@ async def test_normal_task(tmp_path):
 @pytest.mark.asyncio
 async def test_idempotent_send(tmp_path):
     d, store, backends, _ = make(tmp_path, {"a": "ok"})
-    t1 = await d.submit("a", "x", message_id="m-1")
-    t2 = await d.submit("a", "x", message_id="m-1")
-    assert t1.task_id == t2.task_id, "同一个 messageId 应返回同一个 Task"
-    await wait_state(store, t1.task_id, TaskState.COMPLETED)
+    t1 = await d.submit("a", "x", messageId="m-1")
+    t2 = await d.submit("a", "x", messageId="m-1")
+    assert t1.taskId == t2.taskId, "同一个 messageId 应返回同一个 Task"
+    await wait_state(store, t1.taskId, TaskState.COMPLETED)
     assert len(backends["a"].calls) == 1, "agent 只应被驱动一次"
 
 
@@ -66,7 +66,7 @@ async def test_idempotent_send(tmp_path):
 async def test_loop_guard_visited(tmp_path):
     d, *_ = make(tmp_path, {"a": "ok", "b": "ok"})
     with pytest.raises(InvalidParams) as e:
-        await d.submit("a", "x", visited_agents=["a"])
+        await d.submit("a", "x", visitedAgents=["a"])
     assert "回环" in str(e.value)
 
 
@@ -74,7 +74,7 @@ async def test_loop_guard_visited(tmp_path):
 async def test_loop_guard_depth(tmp_path):
     d, *_ = make(tmp_path, {"a": "ok"})
     with pytest.raises(InvalidParams):
-        await d.submit("a", "x", delegation_depth=3)
+        await d.submit("a", "x", delegationDepth=3)
 
 
 # ── A3 input-required 全流程 ─────────────────────────────────
@@ -82,13 +82,13 @@ async def test_loop_guard_depth(tmp_path):
 async def test_input_required_roundtrip(tmp_path):
     d, store, _, _ = make(tmp_path, {"a": "ask"})
     t = await d.submit("a", "危险操作")
-    await wait_state(store, t.task_id, TaskState.INPUT_REQUIRED)
-    got = await store.get(t.task_id)
-    assert got.pending_question == "放行吗？"
+    await wait_state(store, t.taskId, TaskState.INPUT_REQUIRED)
+    got = await store.get(t.taskId)
+    assert got.pendingQuestion == "放行吗？"
 
-    await d.answer(t.task_id, "yes")
-    await wait_state(store, t.task_id, TaskState.COMPLETED)
-    final = await store.get(t.task_id)
+    await d.answer(t.taskId, "yes")
+    await wait_state(store, t.taskId, TaskState.COMPLETED)
+    final = await store.get(t.taskId)
     assert "answered: yes" in final.artifacts[-1].parts[0].text
 
 
@@ -96,9 +96,9 @@ async def test_input_required_roundtrip(tmp_path):
 async def test_answer_wrong_state_rejected(tmp_path):
     d, store, _, _ = make(tmp_path, {"a": "ok"})
     t = await d.submit("a", "x")
-    await wait_state(store, t.task_id, TaskState.COMPLETED)
+    await wait_state(store, t.taskId, TaskState.COMPLETED)
     with pytest.raises(InvalidParams):
-        await d.answer(t.task_id, "yes")
+        await d.answer(t.taskId, "yes")
 
 
 # ── input-required 不堵分片队列 ──────────────────────────────
@@ -107,12 +107,12 @@ async def test_input_required_does_not_block_shard(tmp_path):
     """第一路卡在等放行，第二路必须能跑完。"""
     d, store, _, _ = make(tmp_path, {"a": "ask"})
     t1 = await d.submit("a", "first")
-    await wait_state(store, t1.task_id, TaskState.INPUT_REQUIRED)
+    await wait_state(store, t1.taskId, TaskState.INPUT_REQUIRED)
 
     # 换脚本让第二路正常完成
     d.backends["a"].script = "ok"
     t2 = await d.submit("a", "second")
-    await wait_state(store, t2.task_id, TaskState.COMPLETED, timeout=5)
+    await wait_state(store, t2.taskId, TaskState.COMPLETED, timeout=5)
 
 
 # ── 执行错误 → FAILED（不是 JSON-RPC error）──────────────────
@@ -120,9 +120,9 @@ async def test_input_required_does_not_block_shard(tmp_path):
 async def test_backend_failure_becomes_failed_state(tmp_path):
     d, store, _, _ = make(tmp_path, {"a": "boom"})
     t = await d.submit("a", "x")
-    await wait_state(store, t.task_id, TaskState.FAILED)
-    got = await store.get(t.task_id)
-    assert "脚本要求的失败" in (got.error or "")
+    await wait_state(store, t.taskId, TaskState.FAILED)
+    got = await store.get(t.taskId)
+    assert "脚本要求的失败" in (got.error.message if got.error else "")
 
 
 # ── A8 桥重启恢复：working → FAILED，不留僵尸 ────────────────
@@ -130,12 +130,12 @@ async def test_backend_failure_becomes_failed_state(tmp_path):
 async def test_recover_marks_working_failed(tmp_path):
     d, store, _, _ = make(tmp_path, {"a": "ok"})
     t = await d.submit("a", "x")
-    await wait_state(store, t.task_id, TaskState.COMPLETED)
+    await wait_state(store, t.taskId, TaskState.COMPLETED)
 
     # 手工造一个"停在 working"的任务，模拟上次跑一半就死了
     t2 = await d.submit("a", "y")
-    await wait_state(store, t2.task_id, TaskState.COMPLETED)
-    cur = await store.get(t2.task_id)
+    await wait_state(store, t2.taskId, TaskState.COMPLETED)
+    cur = await store.get(t2.taskId)
     cur.state = TaskState.WORKING
     await store.save(cur)
 
@@ -148,9 +148,9 @@ async def test_recover_marks_working_failed(tmp_path):
                     self_card=None, bus=EventBus(), config=d.config,
                     app_factory=lambda: None)
     await srv._recover()
-    after = await store2.get(t2.task_id)
+    after = await store2.get(t2.taskId)
     assert after.state == TaskState.FAILED, "working 必须被标 FAILED，不能留僵尸"
-    assert "桥重启" in (after.error or "")
+    assert "桥重启" in (after.error.message if after.error else "")
 
 
 # ── A7 SSE 快照：终态之后连上也能拿到状态 ────────────────────
@@ -159,10 +159,10 @@ async def test_sse_snapshot_after_terminal(tmp_path):
     from contactor.transport.http_jsonrpc import _sse
     d, store, _, bus = make(tmp_path, {"a": "ok"})
     t = await d.submit("a", "x")
-    await wait_state(store, t.task_id, TaskState.COMPLETED)
+    await wait_state(store, t.taskId, TaskState.COMPLETED)
 
     got = []
-    async for chunk in _sse(bus, d, t.task_id):
+    async for chunk in _sse(bus, d, t.taskId):
         got.append(chunk)
     assert got, "终态之后订阅也必须有输出（快照）"
     assert '"state":"completed"' in got[0].replace(" ", "")

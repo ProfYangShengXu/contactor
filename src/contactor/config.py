@@ -8,8 +8,30 @@ from pydantic import BaseModel, Field
 HOME = os.path.expandvars(r"%LOCALAPPDATA%\contactor")
 
 
+class SkillSpec(BaseModel):
+    """★ 业务能力，不是函数名（lec14 教案 5.3）。
+
+    反例（本桥原来就是这么干的）：
+        skills: [{id: "dsh", name: "dsh", description: "委托给 dsh"}]
+    —— 这是【名字粒度】不是【业务能力粒度】。后果：编排器无法判断"适不适合接这个活"，
+       而且暴露了内部实现（对方内部是黑盒是设计意图，不是缺陷）。
+
+    正例：
+        skills: [{id: "code-refactor", name: "代码重构",
+                  description: "在仓库内做多文件重构并跑测试",
+                  examples: ["把 X 模块从 A 框架迁到 B"]}]
+    """
+    id: str
+    name: str
+    description: str = ""
+    tags: list[str] = Field(default_factory=list)
+    examples: list[str] = Field(default_factory=list)
+
+
 class AgentSpec(BaseModel):
     kind: Literal["acp", "http_api", "subprocess_cli"]
+    description: str = ""                 # 名片上的 description（人看的）
+    skills: list[SkillSpec] = Field(default_factory=list)   # ★ 业务能力清单
     command: list[str] | None = None
     cwd: str | None = None
     workspace: str | None = None          # 传给 agent 的工作目录（可能和 cwd 不同）

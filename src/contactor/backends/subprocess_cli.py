@@ -17,8 +17,8 @@ import asyncio, os, uuid
 from typing import AsyncIterator
 
 from ..domain.errors import BackendFailure
-from ..domain.models import (AgentCard, Artifact, Message, Part, Skill, Task,
-                             TaskEvent, TaskState)
+from ..domain.models import (AgentCapabilities, AgentCard, Artifact, Message,
+                             Part, Skill, Task, TaskEvent, TaskState)
 from ..ports import BackendContext
 
 
@@ -33,7 +33,8 @@ class SubprocessCliBackend:
                  cwd: str | None = None, workspace: str | None = None,
                  timeout_s: int = 1800, prompt_via: str = "stdin",
                  prompt_flag: list[str] | None = None,
-                 card_override: dict | None = None):
+                 card_override: dict | None = None,
+                 description: str = "", skills: list[Skill] | None = None):
         if not command:
             raise ValueError(f"subprocess_cli agent {name!r} 必须给 command")
         self._name = name
@@ -44,6 +45,8 @@ class SubprocessCliBackend:
         self._prompt_via = prompt_via
         self._prompt_flag = list(prompt_flag or [])
         self._card_override = card_override or {}
+        self._description = description
+        self._skills = list(skills or [])       # ★ 业务能力由配置给，不自动生成
         self._procs: dict[str, asyncio.subprocess.Process] = {}
 
     # ── 端口实现 ────────────────────────────────────────────────
@@ -59,23 +62,25 @@ class SubprocessCliBackend:
         """
         base = dict(
             name=self._name,
-            description=f"命令行兜底 agent（无流式 / 无中断 / 无会话复用）",
+            description=self._description
+                        or "命令行兜底 agent（无流式 / 无中断 / 无会话复用）",
             url=f"cli://{self._name}",
             version="0.1.0",
-            capabilities={
-                "streaming": False,          # ← 能力缺口也进名片
-                "inputRequired": False,      # ← 最重要的缺口
-                "contentVerified": False,
-            },
-            skills=[Skill(id=self._name, name=self._name,
-                          description="一次性命令行调用")],
+            capabilities=AgentCapabilities(
+                streaming=False,            # ← 能力缺口也进名片
+                pushNotifications=False,
+                stateTransitionHistory=False,
+                inputRequired=False,        # ← 最重要的缺口
+                contentVerified=False,
+            ),
+            skills=self._skills,
         )
         base.update(self._card_override)
         return AgentCard(**base)
 
     async def submit(self, task: Task, message: Message,
                      ctx: BackendContext) -> AsyncIterator[TaskEvent]:
-        yield TaskEvent(kind="status", task_id=task.task_id, state=TaskState.WORKING)
+        yield TaskEvent(kind="status", taskId=task.taskId, state=TaskState.WORKING)
 
         text = self._text_of(message)
         argv = list(self._command)
@@ -96,7 +101,7 @@ class SubprocessCliBackend:
             raise BackendFailure(f"命令不存在：{argv[0]}", retryable=False,
                                  detail=str(e)) from e
 
-        self._procs[task.task_id] = proc
+        self._procs[task.taskId] = proc
         ctx.log(f"subprocess_cli[{self._name}] 起进程 pid={proc.pid}")
         try:
             try:
@@ -109,7 +114,7 @@ class SubprocessCliBackend:
                     f"命令行 agent 超时（{self._timeout_s}s）",
                     retryable=True, detail="可能是 agent 在等标准输入") from e
         finally:
-            self._procs.pop(task.task_id, None)
+            self._procs.pop(task.taskId, None)
 
         err_text = err.decode("utf-8", "replace").strip()
         if proc.returncode != 0:
@@ -134,12 +139,12 @@ class SubprocessCliBackend:
         parts.append(Part(kind="data", data=meta))
 
         yield TaskEvent(
-            kind="artifact", task_id=task.task_id,
-            artifact=Artifact(artifact_id=uuid.uuid4().hex[:12], name="stdout",
-                              description=f"{self._name} 的 stdout（requires_review=True）",
+            kind="artifact", taskId=task.taskId,
+            artifact=Artifact(artifactId=uuid.uuid4().hex[:12], name="stdout",
+                              description=f"{self._name} 的 stdout（requiresReview=True）",
                               parts=parts))
-        yield TaskEvent(kind="status", task_id=task.task_id,
-                        state=TaskState.COMPLETED, is_final=True)
+        yield TaskEvent(kind="status", taskId=task.taskId,
+                        state=TaskState.COMPLETED, final=True)
 
     async def resume(self, task: Task, answer: Message) -> AsyncIterator[TaskEvent]:
         raise BackendFailure(
@@ -149,7 +154,7 @@ class SubprocessCliBackend:
         yield  # pragma: no cover  —— 让它仍是 async generator
 
     async def cancel(self, task: Task) -> None:
-        proc = self._procs.get(task.task_id)
+        proc = self._procs.get(task.taskId)
         if proc:
             await self._kill(proc)
 

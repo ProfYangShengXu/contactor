@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio, time, uuid
 from dataclasses import dataclass
 
-from ..domain.models import Artifact, Message, Part, Task, TaskEvent, TaskState
+from ..domain.models import Artifact, Message, Part, Task, TaskEvent, TaskState, TaskError
 from ..domain.lifecycle import assert_transition, is_terminal
 from ..domain.errors import BackendFailure, TaskNotFound, InvalidParams
 
@@ -19,7 +19,7 @@ def _id() -> str:
 class _Ctx:
     """BackendContext 的实现。★ 只给必要的东西。"""
     workspace: str
-    context_id: str
+    contextId: str
     _logger: object = None
 
     def log(self, msg: str) -> None:
@@ -36,66 +36,66 @@ class Dispatcher:
 
     # ── 对外入口 ────────────────────────────────────────────────
 
-    async def submit(self, agent: str, text: str, context_id: str | None = None,
-                     *, message_id: str | None = None,
-                     delegation_depth: int = 0,
-                     visited_agents: list[str] | None = None) -> Task:
+    async def submit(self, agent: str, text: str, contextId: str | None = None,
+                     *, messageId: str | None = None,
+                     delegationDepth: int = 0,
+                     visitedAgents: list[str] | None = None) -> Task:
         """message/send 入口。建 Task，入分片队列，【立即返回】。"""
         # ── 幂等去重 ──────────────────────────────────────────
-        if message_id:
-            existing = await self.store.find_by_origin_message(message_id)
+        if messageId:
+            existing = await self.store.find_by_origin_message(messageId)
             if existing is not None:
-                self.log(f"duplicate message_id={message_id} -> task {existing.task_id}")
+                self.log(f"duplicate messageId={messageId} -> task {existing.taskId}")
                 return existing
 
         # ── 回环防护（双防线）────────────────────────────────
-        visited = list(visited_agents or [])
+        visited = list(visitedAgents or [])
         if agent in visited:
             chain = " -> ".join(visited + [agent])
             raise InvalidParams(f"委托链上已出现过 {agent}，拒绝回环（链：{chain}）")
-        if delegation_depth >= self.config.max_delegation_depth:
+        if delegationDepth >= self.config.max_delegation_depth:
             raise InvalidParams(
-                f"委托链过深（{delegation_depth} >= {self.config.max_delegation_depth}），疑似回环")
+                f"委托链过深（{delegationDepth} >= {self.config.max_delegation_depth}），疑似回环")
 
         backend = self._backend(agent)
-        ctx_id = context_id or _id()
-        task = Task(task_id=_id(), context_id=ctx_id, agent=agent,
-                    delegation_depth=delegation_depth,
-                    visited_agents=visited + [agent],
-                    origin_message_id=message_id,
-                    created_at=time.time(), updated_at=time.time())
+        ctx_id = contextId or _id()
+        task = Task(taskId=_id(), contextId=ctx_id, traceId=_id(), agent=agent,
+                    delegationDepth=delegationDepth,
+                    visitedAgents=visited + [agent],
+                    originMessageId=messageId,
+                    createdAt=time.time(), updatedAt=time.time())
         await self.store.create(task)
 
         msg = Message(role="user", parts=[Part(kind="text", text=text)],
-                      message_id=_id(), task_id=task.task_id, context_id=ctx_id)
-        await self.store.append_message(task.task_id, msg)
+                      messageId=_id(), taskId=task.taskId, contextId=ctx_id)
+        await self.store.append_message(task.taskId, msg)
 
         self._spawn(task, backend, msg, resume=False)
         return task
 
-    async def answer(self, task_id: str, text: str) -> Task:
+    async def answer(self, taskId: str, text: str) -> Task:
         """委托方回答 input-required。★ 本地场景最常走的路。"""
-        task = await self.store.get(task_id)
+        task = await self.store.get(taskId)
         if task is None:
-            raise TaskNotFound(task_id)
+            raise TaskNotFound(taskId)
         if task.state != TaskState.INPUT_REQUIRED:
             raise InvalidParams(
-                f"task {task_id} 当前是 {task.state.value}，不是 input-required"
+                f"task {taskId} 当前是 {task.state.value}，不是 input-required"
                 + (f"（error: {task.error}）" if task.error else ""))
 
         ans = Message(role="user", parts=[Part(kind="text", text=text)],
-                      message_id=_id(), task_id=task_id, context_id=task.context_id)
-        await self.store.append_message(task_id, ans)
-        task.pending_question = None
+                      messageId=_id(), taskId=taskId, contextId=task.contextId)
+        await self.store.append_message(taskId, ans)
+        task.pendingQuestion = None
         await self.store.save(task)
 
         self._spawn(task, self._backend(task.agent), ans, resume=True)
         return task
 
-    async def cancel(self, task_id: str) -> Task:
-        task = await self.store.get(task_id)
+    async def cancel(self, taskId: str) -> Task:
+        task = await self.store.get(taskId)
         if task is None:
-            raise TaskNotFound(task_id)
+            raise TaskNotFound(taskId)
         if is_terminal(task.state):
             return task
         try:
@@ -111,12 +111,12 @@ class Dispatcher:
         async def body() -> None:
             await self._drive(task, backend, msg, resume=resume)
         t = asyncio.create_task(self.shards.run(task.agent, body))
-        self._running[task.task_id] = t
-        t.add_done_callback(lambda _: self._running.pop(task.task_id, None))
+        self._running[task.taskId] = t
+        t.add_done_callback(lambda _: self._running.pop(task.taskId, None))
 
     async def _drive(self, task: Task, backend, msg: Message, *, resume: bool) -> None:
         ctx = _Ctx(workspace=self.config.workspace_root,
-                   context_id=task.context_id, _logger=self.log)
+                   contextId=task.contextId, _logger=self.log)
         await self._transition(task, TaskState.WORKING)
 
         try:
@@ -126,38 +126,41 @@ class Dispatcher:
                 if ev.kind == "status" and ev.state is not None:
                     if ev.state == TaskState.INPUT_REQUIRED:
                         # ★★ 同步 → 异步的转换点：落盘 + 推事件 + 【返回】，不阻塞等
-                        task.pending_question = self._text_of(ev.message)
+                        task.pendingQuestion = self._text_of(ev.message)
                         await self._transition(task, TaskState.INPUT_REQUIRED)
                         await self.store.save(task)
-                        await self.sink.emit(task.task_id, ev)
+                        await self.sink.emit(task.taskId, ev)
                         return
-                    await self._transition(task, ev.state, final=ev.is_final)
+                    await self._transition(task, ev.state, final=ev.final)
                 elif ev.kind == "artifact" and ev.artifact is not None:
                     task.artifacts.append(ev.artifact)
 
                 if ev.message is not None:
-                    await self.store.append_message(task.task_id, ev.message)
-                await self.sink.emit(task.task_id, ev)
-                if ev.is_final:
+                    await self.store.append_message(task.taskId, ev.message)
+                await self.sink.emit(task.taskId, ev)
+                if ev.final:
                     break
             else:
-                self.log(f"backend 流结束但没给终态，兜底按完成处理: {task.task_id}")
+                self.log(f"backend 流结束但没给终态，兜底按完成处理: {task.taskId}")
                 await self._transition(task, TaskState.COMPLETED, final=True)
 
         except BackendFailure as e:
-            task.error = e.to_message_text()
+            task.error = e.to_task_error(task.taskId, task.traceId)
             await self._transition(task, TaskState.FAILED, final=True)
-            await self.sink.emit(task.task_id, TaskEvent(
-                kind="status", task_id=task.task_id, state=TaskState.FAILED,
-                is_final=True,
+            await self.sink.emit(task.taskId, TaskEvent(
+                kind="status", taskId=task.taskId, state=TaskState.FAILED,
+                final=True,
                 message=Message(role="agent",
                                 parts=[Part(kind="text", text=e.to_message_text())],
-                                message_id=_id(), task_id=task.task_id)))
+                                messageId=_id(), taskId=task.taskId)))
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            task.error = f"内部错误：{type(e).__name__}: {e}"
-            self.log(f"dispatcher 内部错误 {task.task_id}: {e!r}")
+            task.error = TaskError(code="internal_error",
+                                   message=f"内部错误：{type(e).__name__}: {e}",
+                                   retryable=False, taskId=task.taskId,
+                                   correlationId=task.traceId)
+            self.log(f"dispatcher 内部错误 {task.taskId}: {e!r}")
             await self._transition(task, TaskState.FAILED, final=True)
         finally:
             await self.store.save(task)
@@ -170,11 +173,11 @@ class Dispatcher:
             return
         assert_transition(task.state, to)
         task.state = to
-        task.updated_at = time.time()
+        task.updatedAt = time.time()
         await self.store.save(task)
         if final:
-            await self.sink.emit(task.task_id, TaskEvent(
-                kind="status", task_id=task.task_id, state=to, is_final=True))
+            await self.sink.emit(task.taskId, TaskEvent(
+                kind="status", taskId=task.taskId, state=to, final=True))
 
     def _backend(self, agent: str):
         b = self.backends.get(agent)

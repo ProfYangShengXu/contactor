@@ -12,10 +12,15 @@ from .server import A2AServer
 from .domain.models import AgentCard, Skill
 
 
+def _skills_of(spec: AgentSpec) -> list[Skill]:
+    return [Skill(**s.model_dump()) for s in spec.skills]
+
+
 def make_backend(name: str, spec: AgentSpec) -> AgentBackend:
     if spec.kind == "acp":
         return AcpBackend(name, spec.command, spec.cwd,
-                          workspace=spec.workspace, card_override=spec.card_override)
+                          workspace=spec.workspace, card_override=spec.card_override,
+                          description=spec.description, skills=_skills_of(spec))
     if spec.kind == "http_api":
         from .backends.http_api import HttpApiBackend
         return HttpApiBackend(name, spec.base_url, spec.card_override)
@@ -25,7 +30,8 @@ def make_backend(name: str, spec: AgentSpec) -> AgentBackend:
             name, spec.command, cwd=spec.cwd, workspace=spec.workspace,
             timeout_s=spec.timeout_s or 1800,
             prompt_via=spec.prompt_via, prompt_flag=spec.prompt_flag,
-            card_override=spec.card_override)
+            card_override=spec.card_override,
+            description=spec.description, skills=_skills_of(spec))
     raise ValueError(f"unknown backend kind: {spec.kind}")
 
 
@@ -51,8 +57,13 @@ def build(config: Config, logger=None):
         version="0.1.0",
         capabilities={"streaming": True, "inputRequired": True,
                       "contentVerified": False},
-        skills=[Skill(id=n, name=n, description=f"委托给 {n}")
-                for n in backends])
+        # ★ 桥自己的 skills = 它真的提供的【业务能力】，不是"委托给 X"这种名字粒度
+        skills=[Skill(id="delegate", name="把任务委托给本机另一个 agent",
+                      description="按目标 agent 的名字或能力派活，"
+                                  "支持中断放行、幂等重发、流式查看",
+                      tags=["delegation", "multi-agent"],
+                      examples=["让 dsh 在沙箱里跑一段代码",
+                                "让另一个 agent 独立看一遍这段推理"])])
 
     def app_factory():
         return build_app(dispatcher=dispatcher, bus=bus, self_card=self_card,

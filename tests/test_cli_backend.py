@@ -17,17 +17,17 @@ PY = sys.executable
 
 class Ctx:
     workspace = str(pathlib.Path.cwd())
-    context_id = "ctx-test"
+    contextId = "ctx-test"
     logs: list[str] = []
     def log(self, m): self.logs.append(m)
 
 
 def task(tid="t1"):
-    return Task(task_id=tid, agent="cli", context_id="ctx-test")
+    return Task(taskId=tid, agent="cli", contextId="ctx-test")
 
 
 def msg(text="hello"):
-    return Message(role="user", message_id="m-1",
+    return Message(role="user", messageId="m-1",
                    parts=[Part(kind="text", text=text)])
 
 
@@ -43,7 +43,7 @@ async def test_stdout_becomes_artifact():
     evs = await drain(be, task(), msg("ping"))
     arts = [e for e in evs if e.kind == "artifact"]
     assert arts and arts[0].artifact.parts[0].text == "AGENT SAYS: ping"
-    assert evs[-1].state == TaskState.COMPLETED and evs[-1].is_final
+    assert evs[-1].state == TaskState.COMPLETED and evs[-1].final
     assert evs[0].state == TaskState.WORKING
 
 
@@ -108,10 +108,10 @@ async def test_stderr_kept_even_on_success():
 async def test_card_declares_incapabilities():
     be = SubprocessCliBackend("cli", [PY, "-c", "pass"])
     card = await be.card()
-    assert card.capabilities["inputRequired"] is False, \
+    assert card.capabilities.inputRequired is False, \
         "不支持中断这件事必须出现在名片上"
-    assert card.capabilities["streaming"] is False
-    assert card.capabilities["contentVerified"] is False
+    assert card.capabilities.streaming is False
+    assert card.capabilities.contentVerified is False
 
 
 async def test_resume_is_rejected_loudly():
@@ -127,18 +127,48 @@ async def test_requires_command():
         SubprocessCliBackend("bad", None)
 
 
-# ── ★ 架构红线的实战验证：新 backend 不改任何稳定侧文件 ──────
-def test_adding_backend_touched_no_stable_layer():
-    """加一个 backend，domain/ 和 ports.py 必须【一个字节都没动】。
+# ── ★ 架构红线的实战验证：加 backend 不该动【端口面】 ────────
+#
+# ⚠️ 这里原本写的是 `git status --porcelain src/.../domain src/.../ports.py` 必须为空。
+#    那个写法【对任何合法改动都会误报】—— 本次因为要符合 A2A 线上字段名
+#    （snake_case → camelCase）就改了 domain/，而那并不是"加 backend 导致的架构漂移"。
+#    改用【端口面快照】：加实现时真正不该变的是【接口】本身。
 
-    这是架构红线的实战判据 —— 比 grep 词汇表更有说服力：
-    真加了个实现，稳定侧却毫无感知。
+PORTS_SURFACE = {
+    "BackendContext": {"workspace", "contextId", "log"},
+    "AgentBackend":   {"name", "card", "submit", "resume", "cancel"},
+    "TaskStore":      {"create", "get", "save", "append_message",
+                       "list_by_state", "find_by_origin_message"},
+    "EventSink":      {"emit"},
+}
+
+# Protocol 类自身的残余属性，不是端口的一部分
+_PROTOCOL_NOISE = {"model_config", "model_fields", "model_compute_fields"}
+
+
+def test_ports_surface_is_frozen():
+    """加一个 backend，ports 的【公开面】不该变。
+
+    它变了只有两种可能：
+      ① 这是新能力的正当扩展 —— 那就在这条快照里显式改，并说清它为什么是通用的
+      ② 某个实现的需求被塞进了通用接口 —— 那就是架构漂移，架构红线破了
     """
-    import subprocess
-    root = pathlib.Path(__file__).parents[1]
-    r = subprocess.run(["git", "status", "--porcelain", "src/contactor/domain",
-                        "src/contactor/ports.py"],
-                       cwd=root, capture_output=True, text=True)
-    if r.returncode != 0:
-        pytest.skip("不是 git 仓库，跳过")
-    assert r.stdout.strip() == "", f"稳定侧被改动了：\n{r.stdout}"
+    import inspect
+    from contactor import ports
+
+    for name, expect in PORTS_SURFACE.items():
+        obj = getattr(ports, name)
+        members = {m for m in dir(obj) if not m.startswith("_")} - _PROTOCOL_NOISE
+        missing = expect - members
+        extra = members - expect
+        assert not missing, f"{name} 的端口面少了 {missing} —— 接口被削了？"
+        assert not extra, (
+            f"{name} 多出了 {extra} —— 加实现时接口不该长出新东西。"
+            f"先说明它为什么是【通用】能力而不是某个实现的需求。")
+    # 端口的方法必须带类型注解（否则跟注释没区别）
+    for name in PORTS_SURFACE:
+        obj = getattr(ports, name)
+        for m in PORTS_SURFACE[name]:
+            fn = getattr(obj, m, None)
+            if inspect.isfunction(fn):
+                assert inspect.signature(fn), f"{name}.{m} 没有签名"

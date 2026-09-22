@@ -15,7 +15,7 @@ class FakeBackend:
         self._name = name
         self.script = script
         self.delay = delay
-        self.calls: list[tuple[str, str]] = []      # (task_id, text)
+        self.calls: list[tuple[str, str]] = []      # (taskId, text)
         self._pending: dict[str, str] = {}
 
     @property
@@ -26,37 +26,37 @@ class FakeBackend:
         return AgentCard(name=self._name, description="fake")
 
     async def submit(self, task: Task, message: Message, ctx) -> AsyncIterator[TaskEvent]:
-        self.calls.append((task.task_id, self._text(message)))
-        yield TaskEvent(kind="status", task_id=task.task_id, state=TaskState.WORKING)
+        self.calls.append((task.taskId, self._text(message)))
+        yield TaskEvent(kind="status", taskId=task.taskId, state=TaskState.WORKING)
         if self.delay:
             await asyncio.sleep(self.delay)
 
         if self.script == "ok":
-            yield TaskEvent(kind="artifact", task_id=task.task_id,
-                            artifact=Artifact(artifact_id="a1", name="out",
+            yield TaskEvent(kind="artifact", taskId=task.taskId,
+                            artifact=Artifact(artifactId="a1", name="out",
                                               parts=[Part(kind="text", text="done: " + self._text(message))]))
-            yield TaskEvent(kind="status", task_id=task.task_id,
-                            state=TaskState.COMPLETED, is_final=True)
+            yield TaskEvent(kind="status", taskId=task.taskId,
+                            state=TaskState.COMPLETED, final=True)
 
         elif self.script == "ask":
-            self._pending[task.task_id] = self._text(message)
-            yield TaskEvent(kind="status", task_id=task.task_id,
-                            state=TaskState.INPUT_REQUIRED, is_final=True,
-                            message=Message(role="agent", message_id="q",
+            self._pending[task.taskId] = self._text(message)
+            yield TaskEvent(kind="status", taskId=task.taskId,
+                            state=TaskState.INPUT_REQUIRED, final=True,
+                            message=Message(role="agent", messageId="q",
                                             parts=[Part(kind="text", text="放行吗？")],
-                                            task_id=task.task_id))
+                                            taskId=task.taskId))
 
         elif self.script == "boom":
             raise BackendFailure("脚本要求的失败", retryable=True, detail="fake")
 
     async def resume(self, task: Task, answer: Message) -> AsyncIterator[TaskEvent]:
-        self.calls.append((task.task_id, "ANSWER:" + self._text(answer)))
-        yield TaskEvent(kind="status", task_id=task.task_id, state=TaskState.WORKING)
-        yield TaskEvent(kind="artifact", task_id=task.task_id,
-                        artifact=Artifact(artifact_id="a2", name="out",
+        self.calls.append((task.taskId, "ANSWER:" + self._text(answer)))
+        yield TaskEvent(kind="status", taskId=task.taskId, state=TaskState.WORKING)
+        yield TaskEvent(kind="artifact", taskId=task.taskId,
+                        artifact=Artifact(artifactId="a2", name="out",
                                           parts=[Part(kind="text", text="answered: " + self._text(answer))]))
-        yield TaskEvent(kind="status", task_id=task.task_id,
-                        state=TaskState.COMPLETED, is_final=True)
+        yield TaskEvent(kind="status", taskId=task.taskId,
+                        state=TaskState.COMPLETED, final=True)
 
     async def cancel(self, task: Task) -> None:
         raise NotImplementedError

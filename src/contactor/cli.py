@@ -71,11 +71,11 @@ def main(argv=None) -> int:
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("answer", help="回答 input-required")
-    p.add_argument("task_id"); p.add_argument("text")
+    p.add_argument("taskId"); p.add_argument("text")
     p.add_argument("--wait", type=float, default=1800)
 
     p = sub.add_parser("get", help="查任务状态与产出")
-    p.add_argument("task_id")
+    p.add_argument("taskId")
 
     args = ap.parse_args(argv)
     cfg = _cfg(args)
@@ -121,9 +121,9 @@ def main(argv=None) -> int:
         return 0
 
     if args.cmd == "send":
-        mid = args.message_id or uuid.uuid4().hex
+        mid = args.messageId or uuid.uuid4().hex
         params = {"agent": args.agent, "text": args.text,
-                  "messageId": mid, "contextId": args.context_id}
+                  "messageId": mid, "contextId": args.contextId}
         if args.stream:
             return _stream(url, params, args.wait)
         r = _rpc(url, "message/send", params)
@@ -132,13 +132,13 @@ def main(argv=None) -> int:
         return _follow(url, r["result"]["task"], args.wait, args.json)
 
     if args.cmd == "answer":
-        r = _rpc(url, "tasks/answer", {"taskId": args.task_id, "text": args.text})
+        r = _rpc(url, "tasks/answer", {"taskId": args.taskId, "text": args.text})
         if "error" in r:
             print(json.dumps(r["error"], ensure_ascii=False)); return 2
         return _follow(url, r["result"]["task"], args.wait, False)
 
     if args.cmd == "get":
-        r = _rpc(url, "tasks/get", {"taskId": args.task_id})
+        r = _rpc(url, "tasks/get", {"taskId": args.taskId})
         print(json.dumps(r.get("result") or r.get("error"), ensure_ascii=False, indent=2))
         return 0
     return 1
@@ -269,14 +269,14 @@ def _stream(url: str, params: dict, wait: float) -> int:
                     if not line.startswith("data: "):
                         continue
                     ev = json.loads(line[6:])
-                    tid = ev.get("task_id") or tid
+                    tid = ev.get("taskId") or tid
                     kind = ev.get("kind")
                     if kind == "status":
                         st = ev.get("state")
                         if st != last_state:            # 同一状态只打一次
                             print(f"[{st}]", file=sys.stderr, flush=True)
                             last_state = st
-                        if ev.get("is_final"):
+                        if ev.get("final"):
                             final = st
                     elif kind == "message":
                         # 流式吐答案：边到边打
@@ -305,7 +305,7 @@ def _stream(url: str, params: dict, wait: float) -> int:
 
 def _follow(url: str, task: dict, wait: float, as_json: bool) -> int:
     """轮询到终态，打印结果。"""
-    tid = task["task_id"]
+    tid = task["taskId"]
     end = time.time() + wait
     last = None
     while time.time() < end:
@@ -331,7 +331,7 @@ def _follow(url: str, task: dict, wait: float, as_json: bool) -> int:
             if as_json:
                 print(json.dumps(t, ensure_ascii=False, indent=2))
             else:
-                print(t.get("pending_question") or "（需要输入）")
+                print(t.get("pendingQuestion") or "（需要输入）")
                 print(f"\n→ 用 contactor answer {tid} \"<你的回答>\" 继续")
             return 4                                   # 4 = 需要人介入
         time.sleep(0.5)

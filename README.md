@@ -246,6 +246,64 @@ GET /.well-known/agent-card.json    A2A 规范规定的名片路径
 GET /health
 ```
 
+### ⚠️ 非规范键（本桥扩展，别以为是 A2A 的一部分）
+
+`capabilities` 里前三个是 A2A 规范键，后两个是**本桥加的**：
+
+```
+streaming              规范
+pushNotifications      规范（本桥未实现，恒 false）
+stateTransitionHistory 规范
+─────────────────────────────────────────
+inputRequired          本桥扩展 —— 会不会中途要放行（本地场景最关键的一个）
+contentVerified        本桥扩展 —— 桥是否验证过内容（恒 false）
+```
+
+规范外的读者忽略它们即可；本桥的调用方应该读它们 ——
+**`inputRequired: false` 的 agent 不能用来做需要逐步放行的任务。**
+
+### 事件类型映射（本桥的 SSE 形状 ≙ A2A）
+
+```
+本桥 kind=status    ≙ A2A TaskStatusUpdateEvent
+本桥 kind=artifact  ≙ A2A TaskArtifactUpdateEvent
+                      （Artifact.append=true 表示这是增量追加，大产出可以一节一节推）
+本桥 kind=message   ≙ A2A Message
+每个事件带 final: true/false
+```
+
+⚠️ **这是本桥的封装形状，不是 A2A 规范的事件结构** —— 缺口如实列在下面。
+
+### 冲突与资源抢占：分片 > 锁
+
+同一 agent 的委托走**单队列**（`runtime/shards.py`），不是靠锁：
+
+```
+按 agent 分片        → 同一个 agent 的任务天然串行，不会互相抢
+                      （而且它在 input-required 时会释放队列，不堵后面的）
+不是"先抢到锁再执行" → 免掉锁超时 / 脑裂 / 续期
+```
+
+**判据：能不能在结构上让冲突不发生？能就分片，不能才回头用锁 / 仲裁。**
+
+### 「合法但胡说」怎么拦（★ 桥不拦，但你必须拦）
+
+桥**不做内容校验** —— 它只保证"执行完毕"，不保证"结果正确"。
+`state: completed` + schema 合法 ≠ 对。**这类错误会一路绿灯到下游。**
+
+调用方自己要有这几道（按代价从低到高）：
+
+```
+① 外部事实源比对   它给的 ID / 金额 / 日期，去源系统核一遍
+② 内部一致性       时间、金额、ID 之间自相矛盾吗
+③ dry-run         有副作用的先空跑一遍
+④ 抽样人工核
+⑤ verifier agent  ★ 带边界：LLM 审 LLM 是【建议性】不是【结构性】
+```
+
+**为什么它比超时危险**：超时是**显式**的，你必然走到错误分支；
+"合法但胡说"**不报错** —— 失败成本从「任务没做成」变成「错误被当成果交付」。
+
 ### A2A 子集缺口（如实列出）
 
 ```

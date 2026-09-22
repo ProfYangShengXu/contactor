@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio, json, sys, uuid
 from typing import Any, AsyncIterator
 
-from ..domain.models import (AgentCard, Artifact, Message, Part, Skill,
+from ..domain.models import (AgentCapabilities, AgentCard, Artifact, Message, Part, Skill,
                              Task, TaskEvent, TaskState)
 from ..domain.errors import BackendFailure
 
@@ -196,14 +196,19 @@ class AcpBackend:
     """name → 一个 AcpSession（懒启动 + 复用）。"""
 
     def __init__(self, name: str, command: list[str], cwd: str | None = None,
-                 workspace: str | None = None, card_override: dict | None = None):
+                 workspace: str | None = None, card_override: dict | None = None,
+                 description: str = "", skills: list[Skill] | None = None):
         self.name, self.command, self.cwd = name, command, cwd
         self.workspace = workspace or cwd or "."
         self._card_override = card_override
+        # ★ 业务能力由【配置】给，不从 agent 名字自动生成
+        #   （lec14 教案 5.3：skills 是业务语义，不是函数/名字粒度）
+        self._description = description
+        self._skills = list(skills or [])
         self._sess: AcpSession | None = None
         self._session_by_ctx: dict[str, str] = {}
-        self._inflight: dict[str, asyncio.Task] = {}     # task_id → 挂着的 prompt 请求
-        self._pending_perm: dict[str, str] = {}          # task_id → permission key
+        self._inflight: dict[str, asyncio.Task] = {}     # taskId → 挂着的 prompt 请求
+        self._pending_perm: dict[str, str] = {}          # taskId → permission key
         self._session_by_ctx_hint: str | None = None     # 最近一次会话 id（排查用）
 
     # ── 基础设施 ───────────────────────────────────────────────
@@ -221,36 +226,41 @@ class AcpBackend:
         info = (sess._init_result or {}).get("result", {})
         ai = info.get("agentInfo", {})
         return AgentCard(name=self.name,
-                         description=f"ACP agent: {ai.get('name', self.name)}",
+                         description=self._description
+                                     or f"ACP agent: {ai.get('name', self.name)}",
                          version=str(ai.get("version", "0.0.0")),
-                         capabilities={"streaming": True, "inputRequired": True,
-                                       "contentVerified": False})
+                         # A2A 规范键 + 本桥扩展键（扩展的见 README「非规范键」）
+                         capabilities=AgentCapabilities(
+                             streaming=True, pushNotifications=False,
+                             stateTransitionHistory=True,
+                             inputRequired=True, contentVerified=False),
+                         skills=self._skills)
 
     # ── 委托 ──────────────────────────────────────────────────
 
     async def _session_for(self, ctx) -> str:
         sess = await self._ensure()
-        if ctx.context_id not in self._session_by_ctx:
+        if ctx.contextId not in self._session_by_ctx:
             r = await sess.request("session/new",
                                    {"cwd": self.workspace, "mcpServers": []}, timeout=120)
             if "error" in r:
                 raise BackendFailure(f"session/new 失败: {r['error'].get('message')}",
                                      retryable=False,
                                      detail=f"cwd={self.workspace}")
-            self._session_by_ctx[ctx.context_id] = r["result"]["sessionId"]
+            self._session_by_ctx[ctx.contextId] = r["result"]["sessionId"]
             self._session_by_ctx_hint = r["result"]["sessionId"]
-        return self._session_by_ctx[ctx.context_id]
+        return self._session_by_ctx[ctx.contextId]
 
     async def submit(self, task: Task, message: Message,
                      ctx) -> AsyncIterator[TaskEvent]:
         sid = await self._session_for(ctx)
-        yield TaskEvent(kind="status", task_id=task.task_id, state=TaskState.WORKING)
+        yield TaskEvent(kind="status", taskId=task.taskId, state=TaskState.WORKING)
         async for ev in self._turn(task, sid, self._text_of(message)):
             yield ev
 
     async def resume(self, task: Task, answer: Message) -> AsyncIterator[TaskEvent]:
         sess = await self._ensure()
-        key = self._pending_perm.pop(task.task_id, None)
+        key = self._pending_perm.pop(task.taskId, None)
         if key:
             allow = self._is_allow(answer)
             ok = await sess.answer_permission(key, allow)
@@ -260,15 +270,15 @@ class AcpBackend:
                     "放行请求已失效（桥可能重启过），请重新发起这个任务",
                     retryable=True)
         else:
-            sid = self._session_by_ctx.get(task.context_id)
+            sid = self._session_by_ctx.get(task.contextId)
             if sid is None:
                 raise BackendFailure("会话已丢失（桥重启过），请重新发起",
                                      retryable=True)
-            yield TaskEvent(kind="status", task_id=task.task_id, state=TaskState.WORKING)
+            yield TaskEvent(kind="status", taskId=task.taskId, state=TaskState.WORKING)
             async for ev in self._turn(task, sid, self._text_of(answer)):
                 yield ev
             return
-        yield TaskEvent(kind="status", task_id=task.task_id, state=TaskState.WORKING)
+        yield TaskEvent(kind="status", taskId=task.taskId, state=TaskState.WORKING)
         async for ev in self._continue(task):
             yield ev
 
@@ -281,13 +291,13 @@ class AcpBackend:
             "session/prompt",
             {"sessionId": sid, "prompt": [{"type": "text", "text": text}]},
             timeout=None))                      # 长任务不设超时
-        self._inflight[task.task_id] = fut
+        self._inflight[task.taskId] = fut
         try:
             async for ev in self._consume(task, sess):
                 yield ev
         finally:
             if fut.done():
-                self._inflight.pop(task.task_id, None)
+                self._inflight.pop(task.taskId, None)
 
     async def _continue(self, task: Task) -> AsyncIterator[TaskEvent]:
         """permission 兑现后，继续消费（prompt 请求还挂着）。"""
@@ -296,7 +306,7 @@ class AcpBackend:
             yield ev
 
     async def _consume(self, task: Task, sess: AcpSession) -> AsyncIterator[TaskEvent]:
-        fut = self._inflight.get(task.task_id)
+        fut = self._inflight.get(task.taskId)
         answer_parts: list[str] = []      # ★ 累积答案 → Artifact
         thoughts: list[str] = []          # ★ 累积思路 → Artifact 的 data part
         while True:
@@ -312,7 +322,7 @@ class AcpBackend:
 
             if "_permission_request" in params:
                 pr = params["_permission_request"]
-                self._pending_perm[task.task_id] = pr["key"]
+                self._pending_perm[task.taskId] = pr["key"]
                 # ★ 清空队列里已堆积的 update —— 否则 resume 时会拿到上一轮的残留
                 dropped = 0
                 while not sess._updates.empty():
@@ -322,12 +332,12 @@ class AcpBackend:
                     dropped += 1
                 if dropped:
                     _LOG(f"[acp:{self.name}] input-required 前丢弃 {dropped} 条残留 update")
-                yield TaskEvent(kind="status", task_id=task.task_id,
-                                state=TaskState.INPUT_REQUIRED, is_final=True,
-                                message=Message(role="agent", message_id="perm",
+                yield TaskEvent(kind="status", taskId=task.taskId,
+                                state=TaskState.INPUT_REQUIRED, final=True,
+                                message=Message(role="agent", messageId="perm",
                                                 parts=[Part(kind="text",
                                                             text=self._describe(pr["params"]))],
-                                                task_id=task.task_id))
+                                                taskId=task.taskId))
                 return                                   # ★ 让 dispatcher return，不阻塞
 
             update = params.get("update") or params
@@ -343,11 +353,11 @@ class AcpBackend:
                 t = self._text_of_content(update.get("content"))
                 if t:
                     answer_parts.append(t)
-                    yield TaskEvent(kind="message", task_id=task.task_id,
+                    yield TaskEvent(kind="message", taskId=task.taskId,
                                     message=Message(role="agent",
-                                                    message_id=uuid.uuid4().hex[:12],
+                                                    messageId=uuid.uuid4().hex[:12],
                                                     parts=[Part(kind="text", text=t)],
-                                                    task_id=task.task_id))
+                                                    taskId=task.taskId))
             elif kind == "agent_thought_chunk":
                 t = self._text_of_content(update.get("content"))
                 if t:
@@ -369,22 +379,22 @@ class AcpBackend:
                     "stopReason": stop,
                     "acpSessionId": self._session_by_ctx_hint,
                 }))
-            yield TaskEvent(kind="artifact", task_id=task.task_id,
-                            artifact=Artifact(artifact_id=uuid.uuid4().hex[:12],
+            yield TaskEvent(kind="artifact", taskId=task.taskId,
+                            artifact=Artifact(artifactId=uuid.uuid4().hex[:12],
                                               name="agent-output",
-                                              description=f"{self.name} 的输出（requires_review=True）",
+                                              description=f"{self.name} 的输出（requiresReview=True）",
                                               parts=parts))
 
         if stop == "cancelled":
-            yield TaskEvent(kind="status", task_id=task.task_id,
-                            state=TaskState.CANCELED, is_final=True)
+            yield TaskEvent(kind="status", taskId=task.taskId,
+                            state=TaskState.CANCELED, final=True)
         else:
-            yield TaskEvent(kind="status", task_id=task.task_id,
-                            state=TaskState.COMPLETED, is_final=True)
+            yield TaskEvent(kind="status", taskId=task.taskId,
+                            state=TaskState.COMPLETED, final=True)
 
     async def cancel(self, task: Task) -> None:
         sess = await self._ensure()
-        sid = self._session_by_ctx.get(task.context_id)
+        sid = self._session_by_ctx.get(task.contextId)
         if sid:
             await sess.notify("session/cancel", {"sessionId": sid})
 

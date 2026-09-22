@@ -2,7 +2,7 @@
 from __future__ import annotations
 import asyncio, sys
 import uvicorn
-from .domain.models import TaskState
+from .domain.models import TaskError, TaskState
 
 
 class A2AServer:
@@ -54,7 +54,10 @@ class A2AServer:
             self.log(f"[recover] {len(ir)} 个任务停在 input-required（放行请求已失效）")
         wk = await self.dispatcher.store.list_by_state(TaskState.WORKING)
         for t in wk:
-            t.error = "桥重启，任务中断，请重新发起"
+            t.error = TaskError(code="bridge_restarted",
+                                message="桥重启，任务中断，请重新发起",
+                                retryable=True, taskId=t.taskId,
+                                correlationId=t.traceId)
             await self.dispatcher._transition(t, TaskState.FAILED, final=True)
         if wk:
             self.log(f"[recover] {len(wk)} 个 working 任务被标为 FAILED（避免僵尸）")

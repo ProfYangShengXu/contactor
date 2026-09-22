@@ -19,7 +19,22 @@ agents:
   # ── 会讲 ACP 的 agent：一个 backend 类覆盖全部 ───────────────
   dsh:
     kind: acp
-    # WSL 里的 agent：command 是 Windows 侧启动它的命令
+    description: "DeepSeek Harness：能读写本仓库代码、跑测试、在沙箱内执行命令"
+    # ⚠️ skills 是【业务能力】，不是函数名。
+    #    写成 "委托给 dsh" 这种名字粒度，编排器就无法判断"适不适合接这个活"
+    #    （见 lec14 教案 5.3）。要写"它能替你干什么"。
+    skills:
+      - id: code-edit
+        name: 仓库内改代码
+        description: 读写指定仓库的文件，改完跑它自己的测试
+        tags: [coding]
+        examples:
+          - "把这个模块从 A 框架迁到 B"
+          - "修这个 failing test"
+      - id: sandbox-run
+        name: 沙箱内执行命令
+        description: 在工作区里跑命令和脚本；越出工作区写文件会要放行
+        tags: [shell]
     command: ["wsl", "-d", "Ubuntu", "-u", "root", "--", "bash", "-lc",
               "cd /root/code/deepseek-harness && exec pnpm dsh --profile acp"]
     # ⚠️ workspace 必须是【被包装 agent 所在操作系统】的路径。
@@ -29,16 +44,29 @@ agents:
 
   hermes:
     kind: acp
-    command: ["C:\\path\\to\\hermes-agent\\.venv\\Scripts\\python.exe",
+    description: "Hermes Agent：带工具、记忆、技能库的通用助手"
+    skills:
+      - id: general-assistant
+        name: 通用任务
+        description: 查资料、写文件、调它的工具和记忆
+        tags: [general]
+        examples: ["总结这几份文档", "查一下我上次说的那个配置放哪了"]
+    command: ["C:\\\\path\\\\to\\\\hermes-agent\\\\.venv\\\\Scripts\\\\python.exe",
               "-m", "acp_adapter.entry"]
-    cwd: "C:\\path\\to\\hermes-agent"
-    workspace: "C:\\Users\\you"
+    cwd: "C:\\\\path\\\\to\\\\hermes-agent"
+    workspace: "C:\\\\Users\\\\you"
 
   # ── 不会讲 ACP 的 agent：兜底路径（二等公民）──────────────────
   hermes_cli:
     kind: subprocess_cli
-    command: ["C:\\path\\to\\hermes-agent\\.venv\\Scripts\\hermes.exe"]
+    description: "同一个 Hermes 的一次性命令行调用（无流式 / 无中断 / 无会话复用）"
+    skills:
+      - id: one-shot-answer
+        name: 一次性问答
+        description: 给一段 prompt，拿一段回答。不能中途放行、不能多轮
+        tags: [one-shot]
+    command: ["C:\\\\path\\\\to\\\\hermes-agent\\\\.venv\\\\Scripts\\\\hermes.exe"]
     prompt_via: arg                    # stdin（默认）或 arg
     prompt_flag: ["-z"]                # arg 模式：插在 prompt 前面的固定参数
-    cwd: "C:\\Users\\you"
+    cwd: "C:\\\\Users\\\\you"
     timeout_s: 300

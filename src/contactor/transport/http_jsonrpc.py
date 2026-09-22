@@ -17,20 +17,20 @@ class EventBus:
     def __init__(self):
         self._subs: dict[str, list[asyncio.Queue]] = {}
 
-    def subscribe(self, task_id: str) -> asyncio.Queue:
+    def subscribe(self, taskId: str) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=256)
-        self._subs.setdefault(task_id, []).append(q)
+        self._subs.setdefault(taskId, []).append(q)
         return q
 
-    def unsubscribe(self, task_id: str, q: asyncio.Queue) -> None:
-        subs = self._subs.get(task_id)
+    def unsubscribe(self, taskId: str, q: asyncio.Queue) -> None:
+        subs = self._subs.get(taskId)
         if subs and q in subs:
             subs.remove(q)
             if not subs:
-                self._subs.pop(task_id, None)
+                self._subs.pop(taskId, None)
 
-    async def emit(self, task_id: str, event: TaskEvent) -> None:
-        for q in list(self._subs.get(task_id, [])):
+    async def emit(self, taskId: str, event: TaskEvent) -> None:
+        for q in list(self._subs.get(taskId, [])):
             try:
                 q.put_nowait(event)
             except asyncio.QueueFull:
@@ -63,21 +63,21 @@ def build_app(*, dispatcher, bus: EventBus, self_card, agents: list[str],
             if method == "message/send":
                 task = await dispatcher.submit(
                     agent=params["agent"], text=params["text"],
-                    context_id=params.get("contextId"),
-                    message_id=params.get("messageId"),
-                    delegation_depth=params.get("delegationDepth", 0),
-                    visited_agents=params.get("visitedAgents"))
+                    contextId=params.get("contextId"),
+                    messageId=params.get("messageId"),
+                    delegationDepth=params.get("delegationDepth", 0),
+                    visitedAgents=params.get("visitedAgents"))
                 return {"jsonrpc": "2.0", "id": rid,
                         "result": {"task": task.model_dump(mode="json")}}
 
             if method == "message/stream":
                 task = await dispatcher.submit(
                     agent=params["agent"], text=params["text"],
-                    context_id=params.get("contextId"),
-                    message_id=params.get("messageId"),
-                    delegation_depth=params.get("delegationDepth", 0),
-                    visited_agents=params.get("visitedAgents"))
-                return StreamingResponse(_sse(bus, dispatcher, task.task_id),
+                    contextId=params.get("contextId"),
+                    messageId=params.get("messageId"),
+                    delegationDepth=params.get("delegationDepth", 0),
+                    visitedAgents=params.get("visitedAgents"))
+                return StreamingResponse(_sse(bus, dispatcher, task.taskId),
                                          media_type="text/event-stream")
 
             if method == "tasks/get":
@@ -125,11 +125,11 @@ def build_app(*, dispatcher, bus: EventBus, self_card, agents: list[str],
     return app
 
 
-async def _sse(bus: EventBus, dispatcher, task_id: str):
+async def _sse(bus: EventBus, dispatcher, taskId: str):
     """★★ 顺序：【先订阅 → 再取快照 → 再推后续】。反了会丢事件。"""
-    q = bus.subscribe(task_id)
+    q = bus.subscribe(taskId)
     try:
-        snap = await dispatcher.store.get(task_id)
+        snap = await dispatcher.store.get(taskId)
         if snap is not None:
             yield f"data: {_snapshot(snap).model_dump_json()}\n\n"
             if snap.state in TERMINAL_STATES:
@@ -137,12 +137,12 @@ async def _sse(bus: EventBus, dispatcher, task_id: str):
         while True:
             ev: TaskEvent = await q.get()
             yield f"data: {ev.model_dump_json()}\n\n"
-            if ev.is_final:
+            if ev.final:
                 return
     finally:
-        bus.unsubscribe(task_id, q)
+        bus.unsubscribe(taskId, q)
 
 
 def _snapshot(task) -> TaskEvent:
-    return TaskEvent(kind="status", task_id=task.task_id, state=task.state,
-                     is_final=False)
+    return TaskEvent(kind="status", taskId=task.taskId, state=task.state,
+                     final=False)
