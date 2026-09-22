@@ -47,7 +47,11 @@ async def test_normal_task(tmp_path):
     t = await d.submit("a", "hello")
     await wait_state(store, t.taskId, TaskState.COMPLETED)
     got = await store.get(t.taskId)
-    assert got.artifacts[0].parts[0].text == "done: hello"
+    # 假后端把收到的 prompt 原样回显 —— 正好用它验证【合同真的被送出去了】
+    sent = got.artifacts[0].parts[0].text
+    assert sent.startswith("done: hello"), "用户原文要完整到达"
+    assert "[[NEEDS_DECISION]]" in sent, "★ 决策契约必须附在出站 prompt 上（否则标记没有读者）"
+    assert got.state == TaskState.COMPLETED, "回显契约 ≠ 在做决策，不该被误判成 input-required"
 
 
 # ── A6 幂等 ──────────────────────────────────────────────────
@@ -84,7 +88,9 @@ async def test_input_required_roundtrip(tmp_path):
     t = await d.submit("a", "危险操作")
     await wait_state(store, t.taskId, TaskState.INPUT_REQUIRED)
     got = await store.get(t.taskId)
-    assert got.pendingQuestion == "放行吗？"
+    assert got.pending is not None
+    assert got.pending.kind == "permission"
+    assert got.pending.question == "放行吗？"
 
     await d.answer(t.taskId, "yes")
     await wait_state(store, t.taskId, TaskState.COMPLETED)
@@ -174,3 +180,13 @@ def test_illegal_transition():
     with pytest.raises(IllegalTransition):
         assert_transition(TaskState.COMPLETED, TaskState.WORKING)
     assert_transition(TaskState.INPUT_REQUIRED, TaskState.WORKING)   # 这条必须合法
+
+
+async def test_contract_can_be_disabled(tmp_path):
+    """关掉开关 → 出站 prompt 就是用户原文，一字不多。"""
+    d, store, _, _ = make(tmp_path, {"a": "ok"})
+    d.config.append_decision_contract = False
+    t = await d.submit("a", "hello")
+    await wait_state(store, t.taskId, TaskState.COMPLETED)
+    got = await store.get(t.taskId)
+    assert got.artifacts[0].parts[0].text == "done: hello"

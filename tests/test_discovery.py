@@ -58,8 +58,8 @@ async def test_capability_gaps_are_reachable(tmp_path):
     await srv._publish_cards()
 
     card = reg.discover()["cli"]
-    assert card.capabilities.inputRequired is False, \
-        "委托方必须在【连接前】就能读到「这个 agent 不能中断」"
+    assert card.capabilities.interruptible is False, \
+        "委托方必须在【连接前】就能读到「这个 agent 中途拦不住」"
 
 
 async def test_broken_card_does_not_block_startup(tmp_path):

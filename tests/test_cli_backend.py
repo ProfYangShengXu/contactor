@@ -10,7 +10,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "src"))
 import pytest
 from contactor.backends.subprocess_cli import SubprocessCliBackend
 from contactor.domain.errors import BackendFailure
-from contactor.domain.models import Message, Part, Task, TaskState
+from contactor.domain.models import (Artifact, Message, Part, Task, TaskState)
 
 PY = sys.executable
 
@@ -106,20 +106,58 @@ async def test_stderr_kept_even_on_success():
 
 # ── ★ 能力缺口必须写进【名片】，不能等踩了坑才知道 ────────────
 async def test_card_declares_incapabilities():
+    """★ 名片要把【两个不同的缺口】分开说，混起来会给出错误的适配判断。
+
+    2026-09-22 改动：加了 decisions.py 的显式契约之后，这个 backend
+    能在【回合末尾】停下来要人拍板了（所以 inputRequired 变成 True）——
+    但它【依然】不能在【执行中途】被拦下（危险命令会在放行前就跑掉）。
+    旧测试把这两件事当成一件，所以现在必须拆开。
+    """
     be = SubprocessCliBackend("cli", [PY, "-c", "pass"])
     card = await be.card()
-    assert card.capabilities.inputRequired is False, \
-        "不支持中断这件事必须出现在名片上"
+    assert card.capabilities.inputRequired is True, \
+        "靠契约它现在能问「选哪个」了 —— 名片不许继续说自己不能"
+    assert card.capabilities.interruptible is False, \
+        "★ 但它仍然不可中断：黑盒进程跑起来就拦不住。这个缺口必须留在名片上"
     assert card.capabilities.streaming is False
     assert card.capabilities.contentVerified is False
 
 
-async def test_resume_is_rejected_loudly():
-    be = SubprocessCliBackend("cli", [PY, "-c", "pass"])
-    with pytest.raises(BackendFailure) as e:
-        async for _ in be.resume(task(), msg("yes")):
-            pass
-    assert "不支持中断" in str(e.value)
+async def test_resume_rebuilds_prompt_from_history():
+    """★ 命令行 backend 的续接 = 【从历史重建 prompt】。
+
+    它没有会话，所以新起的进程必须能自己看出「上一轮问了什么、委托方答了什么、
+    我上次做完到哪了」。少了任何一样，它只会看见最后那句话，然后重新问一遍。
+
+    用的是【有损】重建 —— 进程内状态已随进程消失，这一点名片里如实写了。
+    """
+    be = SubprocessCliBackend("cli", [PY, "-c",
+                                     "import sys; d=sys.stdin.read(); print(len(d))"])
+    tk = task()
+    tk.history = [
+        Message(role="user", messageId="m1", taskId=tk.taskId,
+                parts=[Part(kind="text", text="加配置文件，用 YAML 还是 TOML？")]),
+        Message(role="user", messageId="m2", taskId=tk.taskId, parts=[
+            Part(kind="text", text="用 TOML"),
+            Part(kind="data", data={"pending": {
+                "kind": "decision", "question": "配置文件格式选哪个？",
+                "options": ["YAML", "TOML"], "recommend": "TOML",
+                "reason": "标准库零依赖"}})]),
+    ]
+    tk.artifacts = [Artifact(artifactId="a1", name="stdout", parts=[
+        Part(kind="text", text="我把两种方案的代价都列出来了。")])]
+
+    be2 = SubprocessCliBackend("cli", [PY, "-c",
+                                     "import sys; print(sys.stdin.read())"])
+    got = ""
+    async for ev in be2.resume(tk, msg("用 TOML")):
+        if ev.kind == "artifact":
+            got = "".join(p.text or "" for p in ev.artifact.parts if p.kind == "text")
+
+    for must in ("配置文件格式选哪个？", "YAML", "TOML", "标准库零依赖",
+                 "我把两种方案的代价都列出来了", "用 TOML", "不要再问同一件事"):
+        assert must in got, f"重建的 prompt 里缺了 {must!r} —— 它会重新问一遍"
+    assert got.count("用 TOML") == 1, "回答不该在重建的 prompt 里出现两次"
 
 
 async def test_requires_command():

@@ -260,6 +260,32 @@ set       → 数组（★ 顺序丢失，要稳定就显式排序）
 
 ---
 
+### 任务停在 `input-required` 时先看 `pending.kind`
+
+```json
+{"kind": "permission", "question": "...", "options": ["allow_once","reject_once"]}
+{"kind": "decision",   "question": "...", "options": ["A","B"], "recommend": "A", "reason": "..."}
+```
+
+**两者处理方式完全不同：**
+
+- `permission` —— **危险操作等你放行**，你答 "yes" / "no"
+- `decision` —— **agent 拿不准要你拍板**。有 `recommend` 就直接采纳
+  （它已经给了理由）；**没有 `recommend` 说明它交了个裸选项** —— 那是它的交付缺陷，
+  不是你该替它补的。可以回它：`"你自己按最易回退的那个定，把选择写进交付说明"`
+
+回：`contactor answer <taskId> "<你的回答>"`。任务会**接着上次继续**，不是重跑。
+
+### ⭐ 派活前先读名片上的 `interruptible`
+
+```
+inputRequired: true    → 它会停下来问你（permission / decision 都可能有）
+interruptible: false   → ⚠️ 它【在执行中途拦不住】—— 危险命令会在你放行之前就跑掉
+```
+
+**`interruptible: false` 的 agent 不能用来做需要逐步放行的任务。**
+命令行兜底 backend 就是这种（见 README）。
+
 ### 结果要自己验 —— 桥不替你验
 
 ```

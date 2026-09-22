@@ -76,6 +76,12 @@ class AgentCapabilities(BaseModel):
     inputRequired: bool = False            # 会不会中途要放行 —— 本地场景最关键的一个
     contentVerified: bool = False          # 桥是否验证过内容（恒 false：桥不判断对错）
 
+    # ⚠️ 和 inputRequired 是【两件事】，别混：
+    #    inputRequired  —— 会不会在【回合末尾】停下来等人（放行 或 拍板）
+    #    interruptible  —— 能不能在【执行中途】被拦下
+    # 一个 agent 可以「干完会问你」但「干到一半拦不住」—— 命令行兜底就是这种。
+    interruptible: bool = True
+
 
 class AgentCard(BaseModel):
     """agent 的名片。
@@ -112,6 +118,24 @@ class TaskError(BaseModel):
     correlationId: str = ""         # ★ 跨进程出问题时，拿这个号去对端问
 
 
+class PendingDecision(BaseModel):
+    """★ 任务停下等人拍板时的【结构化】表达。
+
+    ⚠️ 为什么不能只用一段文本：那样「它在问我」和「它干完了」在协议上完全一样 ——
+    都是 state=completed + 一段文字。调用方（另一个 agent / 批处理）会把问句
+    当成果往下传。**这个失败是静默的**：没有报错、没有超时，只是错的。
+
+    `kind` 把两种停下分开（它们的**语义完全不同**，不该共用一个字段）：
+      permission —— 桥拦下的危险操作，要你放行（ACP 原生支持）
+      decision   —— agent 自己拿不准，要你选（ACP 没有这个概念，靠 decisions.py 的契约）
+    """
+    kind: Literal["permission", "decision"] = "decision"
+    question: str = ""
+    options: list[str] = Field(default_factory=list)
+    recommend: str | None = None      # ★ 不许交裸选项 —— 缺了它是可上报的缺陷信号
+    reason: str | None = None
+
+
 class Task(BaseModel):
     """一次委托。★ 桥只持有元数据，不持有 agent 的内部状态。
 
@@ -125,7 +149,7 @@ class Task(BaseModel):
     state: TaskState = TaskState.SUBMITTED
     history: list[Message] = Field(default_factory=list)
     artifacts: list[Artifact] = Field(default_factory=list)
-    pendingQuestion: str | None = None
+    pending: PendingDecision | None = None    # 等拍板（权限放行 or 选哪个）
     error: TaskError | None = None
     createdAt: float = 0.0
     updatedAt: float = 0.0

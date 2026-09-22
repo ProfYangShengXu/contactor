@@ -60,6 +60,10 @@ class Config(BaseModel):
     max_delegation_depth: int = 3
     acp_noise_limit: int = 50
 
+    # ★ 是否把「需要拍板时怎么标」的契约追加到出站 prompt 末尾。
+    #   关掉的话 agent 就不知道有这个标记 —— 那 decisions.py 那套就没有读者。
+    append_decision_contract: bool = True
+
     @classmethod
     def load(cls, path: str) -> "Config":
         raw = yaml.safe_load(io_open(path)) or {}

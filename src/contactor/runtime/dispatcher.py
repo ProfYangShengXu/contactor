@@ -6,13 +6,23 @@ from __future__ import annotations
 import asyncio, time, uuid
 from dataclasses import dataclass
 
-from ..domain.models import Artifact, Message, Part, Task, TaskEvent, TaskState, TaskError
+from ..domain.models import (Artifact, Message, Part, PendingDecision, Task,
+                             TaskError, TaskEvent, TaskState)
 from ..domain.lifecycle import assert_transition, is_terminal
 from ..domain.errors import BackendFailure, TaskNotFound, InvalidParams
+from ..domain.decisions import CONTRACT, split_decision
 
 
 def _id() -> str:
     return uuid.uuid4().hex[:16]
+
+
+def _perm_pending(text: str) -> PendingDecision:
+    """把 ACP 的权限请求包成 PendingDecision（和 decision 走同一条路）。"""
+    opts = [o for o in ("allow_once", "reject_once") if o in (text or "")]
+    return PendingDecision(kind="permission", question=(text or "").strip(),
+                           options=opts)
+
 
 
 @dataclass
@@ -66,7 +76,14 @@ class Dispatcher:
                     createdAt=time.time(), updatedAt=time.time())
         await self.store.create(task)
 
-        msg = Message(role="user", parts=[Part(kind="text", text=text)],
+        # ★ 把「需要拍板时怎么标」的契约附在出站 prompt 末尾。
+        #   不附的话，decisions.py 里那套标记就没有读者 —— 定义得再漂亮也是注释。
+        #   （判据：「任何声明都必须有一条把它送到读者手里的路径。」）
+        out_text = text
+        if self.config.append_decision_contract:
+            out_text = text + "\n" + CONTRACT
+
+        msg = Message(role="user", parts=[Part(kind="text", text=out_text)],
                       messageId=_id(), taskId=task.taskId, contextId=ctx_id)
         await self.store.append_message(task.taskId, msg)
 
@@ -83,10 +100,17 @@ class Dispatcher:
                 f"task {taskId} 当前是 {task.state.value}，不是 input-required"
                 + (f"（error: {task.error}）" if task.error else ""))
 
-        ans = Message(role="user", parts=[Part(kind="text", text=text)],
+        # ★ 把「委托方在回答什么」一并挂进消息里。
+        #   命令行 backend 没有会话，resume 只能靠历史重建 prompt ——
+        #   不带上这个，它就不知道自己上一轮问的是什么、选项有哪些。
+        parts = [Part(kind="text", text=text)]
+        if task.pending is not None:
+            parts.append(Part(kind="data", data={
+                "pending": task.pending.model_dump(), "note": "委托方在回答这个"}))
+        ans = Message(role="user", parts=parts,
                       messageId=_id(), taskId=taskId, contextId=task.contextId)
         await self.store.append_message(taskId, ans)
-        task.pendingQuestion = None
+        task.pending = None
         await self.store.save(task)
 
         self._spawn(task, self._backend(task.agent), ans, resume=True)
@@ -126,11 +150,24 @@ class Dispatcher:
                 if ev.kind == "status" and ev.state is not None:
                     if ev.state == TaskState.INPUT_REQUIRED:
                         # ★★ 同步 → 异步的转换点：落盘 + 推事件 + 【返回】，不阻塞等
-                        task.pendingQuestion = self._text_of(ev.message)
+                        task.pending = _perm_pending(self._text_of(ev.message))
                         await self._transition(task, TaskState.INPUT_REQUIRED)
                         await self.store.save(task)
                         await self.sink.emit(task.taskId, ev)
                         return
+                    if ev.state == TaskState.COMPLETED and ev.final:
+                        # ★★ 「它在问我」与「它干完了」在协议上本来长得一样。
+                        #     这一处是唯一把它们分开的地方：agent 按契约标了
+                        #     [[NEEDS_DECISION]] → 就不是完成，是等人拍板。
+                        d = self._decision_in(task)
+                        if d is not None and task.pending is None:
+                            task.pending = d
+                            await self._transition(task, TaskState.INPUT_REQUIRED)
+                            await self.store.save(task)
+                            await self.sink.emit(task.taskId, TaskEvent(
+                                kind="status", taskId=task.taskId,
+                                state=TaskState.INPUT_REQUIRED, final=True))
+                            return
                     await self._transition(task, ev.state, final=ev.final)
                 elif ev.kind == "artifact" and ev.artifact is not None:
                     task.artifacts.append(ev.artifact)
@@ -184,6 +221,23 @@ class Dispatcher:
         if b is None:
             raise InvalidParams(f"unknown agent: {agent}（已配：{list(self.backends)}）")
         return b
+
+    @staticmethod
+    def _decision_in(task: Task):
+        """扫描已落盘的 artifact，看 agent 有没有按契约标出「需要拍板」。
+
+        ★ 在【终态前】扫，不是在文本流里实时猜。
+          切分用的是显式标记，误判率由契约（而不是正则的运气）决定。
+        """
+        for a in task.artifacts:
+            for part in a.parts:
+                if part.kind != "text" or not part.text:
+                    continue
+                body, d = split_decision(part.text)
+                if d is not None:
+                    part.text = body.strip()     # 产物里不留标记（它是协议，不是交付内容）
+                    return d
+        return None
 
     @staticmethod
     def _text_of(msg: Message | None) -> str:

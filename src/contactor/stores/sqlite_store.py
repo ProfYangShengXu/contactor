@@ -2,7 +2,8 @@
 from __future__ import annotations
 import json, sqlite3, time
 from pathlib import Path
-from ..domain.models import Message, Part, Task, TaskError, TaskState
+from ..domain.models import (Message, Part, PendingDecision, Task, TaskError,
+                             TaskState)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -11,7 +12,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   traceId    TEXT NOT NULL DEFAULT '',
   agent       TEXT NOT NULL,
   state       TEXT NOT NULL,
-  pendingQuestion TEXT,
+  pending    TEXT,
   error       TEXT,
   createdAt  REAL NOT NULL,
   updatedAt  REAL NOT NULL,
@@ -36,7 +37,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_msg_task ON messages(taskId);
 """
 
-_COLS = ("taskId, contextId, traceId, agent, state, pendingQuestion, error,"
+_COLS = ("taskId, contextId, traceId, agent, state, pending, error,"
          " createdAt, updatedAt, artifacts, delegationDepth, visitedAgents,"
          " requiresReview, originMessageId")
 
@@ -48,6 +49,23 @@ def _dump_error(e: TaskError | None) -> str | None:
     至少要知道「能不能重试」和「拿什么号去找对端问」（教案 2.4）。
     """
     return json.dumps(e.model_dump(), ensure_ascii=False) if e else None
+
+
+def _dump_pending(d: PendingDecision | None) -> str | None:
+    """★ 等拍板的状态要落库 —— 桥重启后委托方还得能 `answer`（server.py 的 recovery）。"""
+    return json.dumps(d.model_dump(), ensure_ascii=False) if d else None
+
+
+def _load_pending(raw) -> PendingDecision | None:
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        try:
+            return PendingDecision(**json.loads(raw))
+        except Exception:
+            # 兼容老库里的纯字符串（那时只存了权限请求的一句话）
+            return PendingDecision(kind="permission", question=raw)
+    return PendingDecision(**raw)
 
 
 def _load_error(raw) -> TaskError | None:
@@ -84,9 +102,9 @@ class SqliteTaskStore:
 
     async def save(self, task: Task) -> None:
         self.conn.execute(
-            "UPDATE tasks SET state=?, pendingQuestion=?, error=?, updatedAt=?,"
+            "UPDATE tasks SET state=?, pending=?, error=?, updatedAt=?,"
             " artifacts=? WHERE taskId=?",
-            (task.state.value, task.pendingQuestion, _dump_error(task.error),
+            (task.state.value, _dump_pending(task.pending), _dump_error(task.error),
              task.updatedAt,
              json.dumps([a.model_dump() for a in task.artifacts], ensure_ascii=False),
              task.taskId))
@@ -121,7 +139,7 @@ class SqliteTaskStore:
     def _row_to_task(self, row) -> Task:
         return Task(
             taskId=row[0], contextId=row[1], traceId=row[2], agent=row[3],
-            state=TaskState(row[4]), pendingQuestion=row[5],
+            state=TaskState(row[4]), pending=_load_pending(row[5]),
             error=_load_error(row[6]), createdAt=row[7], updatedAt=row[8],
             artifacts=json.loads(row[9]), delegationDepth=row[10],
             visitedAgents=json.loads(row[11]), requiresReview=bool(row[12]),

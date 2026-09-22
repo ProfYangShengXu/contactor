@@ -3,9 +3,15 @@
 ⚠️ 这是【二等公民】。能力缺口如实列在这里，也如实写进 README，不假装支持：
 
     ❌ 无流式      —— 进程跑完才有输出，中途看不到进展
-    ❌ 无权限征求  —— 没人能被问「这条命令放行吗」。agent 若等输入，
-                      只会挂到 timeout（这是本 backend 最大的坑）
-    ❌ 无会话复用  —— 每次委托起新进程，上下文攒不起来
+    ❌ 不可中断    —— 没人能被问「这条命令放行吗」。它跑起来就是个黑盒，
+                      agent 若等标准输入只会挂到 timeout（这是最大的坑）。
+    ⚠️ 会停在【回合末尾】要人拍板 —— 靠 decisions.py 的显式契约（不靠猜文本），
+                      所以它【能】产出 INPUT_REQUIRED，也【能】resume。
+                      ⚠️ 但这两者不一样：它能在干完之后问你选哪个，
+                         不能在干【之前】停下等你放行。
+    ⚠️ 无会话复用  —— 每次委托起新进程。**续接靠【从历史重建 prompt】**，
+                      不是真会话：上一轮进程里的中间状态（读过哪些文件、
+                      试过什么）已经没了。是【有损重建】，不是恢复。
     ✅ 只能：喂 prompt 进 stdin（或当参数），收 stdout 当 Artifact，
              非零退出码当 FAILED
 
@@ -25,8 +31,8 @@ from ..ports import BackendContext
 class SubprocessCliBackend:
     """把一次性命令行程序当成 agent。
 
-    它【不】产出 INPUT_REQUIRED —— 协议上它没地方说"我需要人裁决"。
-    所以 resume() 永远不该被调到；真调到了说明上游状态机出了问题。
+    ⚠️ 它能产出 INPUT_REQUIRED，但【只是】回合末尾那种（agent 主动标了契约）。
+    它【不能】被中断：危险命令会在你放行之前就跑掉。名片里用 interruptible=False 说明。
     """
 
     def __init__(self, name: str, command: list[str] | None = None, *,
@@ -70,7 +76,11 @@ class SubprocessCliBackend:
                 streaming=False,            # ← 能力缺口也进名片
                 pushNotifications=False,
                 stateTransitionHistory=False,
-                inputRequired=False,        # ← 最重要的缺口
+                # ⚠️ 这两个要分开看，混起来会给出错误的适配判断：
+                #    inputRequired  —— 会不会【在回合末尾】停下来等人（靠契约，现在能）
+                #    interruptible  —— 能不能在【执行中途】被拦下（黑盒，不能）
+                inputRequired=True,
+                interruptible=False,
                 contentVerified=False,
             ),
             skills=self._skills,
@@ -80,16 +90,19 @@ class SubprocessCliBackend:
 
     async def submit(self, task: Task, message: Message,
                      ctx: BackendContext) -> AsyncIterator[TaskEvent]:
-        yield TaskEvent(kind="status", taskId=task.taskId, state=TaskState.WORKING)
+        async for ev in self._run(task, self._text_of(message), ctx):
+            yield ev
 
-        text = self._text_of(message)
+    async def _run(self, task: Task, text: str,
+                   ctx: BackendContext | None = None) -> AsyncIterator[TaskEvent]:
+        yield TaskEvent(kind="status", taskId=task.taskId, state=TaskState.WORKING)
         argv = list(self._command)
         stdin_data: bytes | None = text.encode("utf-8")
         if self._prompt_via == "arg":
             argv += self._prompt_flag + [text]
             stdin_data = None
 
-        cwd = self._workspace or self._cwd or ctx.workspace
+        cwd = self._workspace or self._cwd or (ctx.workspace if ctx else None) or os.getcwd()
         env = dict(os.environ)
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -102,7 +115,8 @@ class SubprocessCliBackend:
                                  detail=str(e)) from e
 
         self._procs[task.taskId] = proc
-        ctx.log(f"subprocess_cli[{self._name}] 起进程 pid={proc.pid}")
+        if ctx is not None:
+            ctx.log(f"subprocess_cli[{self._name}] 起进程 pid={proc.pid}")
         try:
             try:
                 out, err = await asyncio.wait_for(
@@ -130,7 +144,8 @@ class SubprocessCliBackend:
         parts = [Part(kind="text", text=out_text)]
         meta = {"stopReason": "exit_0", "returncode": 0,
                 "backend": "subprocess_cli", "capabilities": {
-                    "streaming": False, "inputRequired": False}}
+                    "streaming": False, "inputRequired": True,
+                    "interruptible": False}}
         if not out_text:
             meta["warning"] = "进程正常退出但 stdout 为空"
             parts[0] = Part(kind="text", text="")
@@ -147,11 +162,48 @@ class SubprocessCliBackend:
                         state=TaskState.COMPLETED, final=True)
 
     async def resume(self, task: Task, answer: Message) -> AsyncIterator[TaskEvent]:
-        raise BackendFailure(
-            f"{self._name} 是命令行兜底 agent，不支持中断与续接"
-            f"（协议上它没地方说「我需要人裁决」）",
-            retryable=False)
-        yield  # pragma: no cover  —— 让它仍是 async generator
+        """★ 续接 = 把历史重建成一段 prompt，再起一次进程。
+
+        **这是有损重建，不是会话恢复** —— 上一轮进程内的状态已经随进程没了。
+        所以名片上 streaming=False 依旧如实：你看不到它这一轮怎么想的。
+        """
+        prompt = self._rebuild(task, answer)
+        async for ev in self._run(task, prompt):
+            yield ev
+
+    def _rebuild(self, task: Task, answer: Message) -> str:
+        """把 task 的历史拼成一段自包含的 prompt。
+
+        ⚠️ 命令行程序没有记忆，所以要把「原任务 + 上一轮产出 + 你上一轮问的 +
+           委托方的回答」全写进去；否则它只会看见你最后那句话。
+        """
+        lines = ["（这是一次续接。你没有上一次进程的记忆，以下是你需要知道的全部。）"]
+        for m in task.history:
+            who = {"user": "委托方", "agent": self._name}.get(m.role, m.role)
+            txt = self._text_of(m)
+            if txt:
+                lines.append(f"[{who}] {txt}")
+            for p in m.parts:                      # ★ 上次问的是什么、选项有哪些
+                if p.kind == "data" and isinstance(p.data, dict) and "pending" in p.data:
+                    pd = p.data["pending"]
+                    lines.append(f"[{who}（上一轮停下等你拍板）] {pd.get('question','')}")
+                    for o in pd.get("options") or []:
+                        lines.append(f"  - {o}")
+                    if pd.get("recommend"):
+                        lines.append(f"  它当时推荐：{pd['recommend']}")
+                    if pd.get("reason"):
+                        lines.append(f"  它当时的理由：{pd['reason']}")
+        for a in task.artifacts:                   # ★ 它上一轮已经做完的部分
+            for p in a.parts:
+                if p.kind == "text" and p.text:
+                    lines.append(f"[{self._name} 上一轮的产出] {p.text}")
+        # 回答已经在 history 里了（dispatcher 先落盘再 resume）—— 别再写一遍，
+        # 否则 prompt 里会出现两句一样的「委托方：用 TOML」。
+        last = self._text_of(task.history[-1]) if task.history else ""
+        if last.strip() != self._text_of(answer).strip():
+            lines.append(f"[委托方] {self._text_of(answer)}")
+        lines.append("（继续做完。不要再问同一件事 —— 决定已经给了。）")
+        return "\n".join(lines)
 
     async def cancel(self, task: Task) -> None:
         proc = self._procs.get(task.taskId)

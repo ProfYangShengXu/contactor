@@ -331,8 +331,27 @@ def _follow(url: str, task: dict, wait: float, as_json: bool) -> int:
             if as_json:
                 print(json.dumps(t, ensure_ascii=False, indent=2))
             else:
-                print(t.get("pendingQuestion") or "（需要输入）")
-                print(f"\n→ 用 contactor answer {tid} \"<你的回答>\" 继续")
+                p = t.get("pending") or {}
+                if not p:
+                    print("（需要输入）")
+                elif p.get("kind") == "permission":
+                    print(f"\U0001f512 要你放行：{p.get('question', '')}")
+                    if p.get("options"):
+                        print(f"   可选：{', '.join(p['options'])}")
+                else:
+                    # ★ 拍板请求 —— 和权限放行是【两件事】，分开显示
+                    print("\u2753 它拿不准，要你拍板：")
+                    if p.get("question"):
+                        print(f"   {p['question']}")
+                    for i, o in enumerate(p.get("options") or [], 1):
+                        mark = "   ← 它的推荐" if o == p.get("recommend") else ""
+                        print(f"   {i}) {o}{mark}")
+                    if p.get("reason"):
+                        print(f"   理由：{p['reason']}")
+                    if not p.get("recommend"):
+                        print("   \u26a0\ufe0f 没给推荐 —— 裸选项，"
+                              "它本该给「推荐 + 理由 + 反选条件」")
+                print(f'\n\u2192 用 contactor answer {t.get("taskId")} "<你的回答>" 继续')
             return 4                                   # 4 = 需要人介入
         time.sleep(0.5)
     print("超时", file=sys.stderr); return 5

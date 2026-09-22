@@ -274,6 +274,81 @@ contentVerified        本桥扩展 —— 桥是否验证过内容（恒 false�
 
 ⚠️ **这是本桥的封装形状，不是 A2A 规范的事件结构** —— 缺口如实列在下面。
 
+### ★「它在问我」和「它干完了」必须能分开
+
+**这是本桥解决的一个具体问题，值得单独说。**
+
+ACP 的 `session/request_permission` 只覆盖**权限放行**（allow / reject），
+**不覆盖「选 A 还是 B」**。所以 agent 干到一半停下来问你要选哪个时，协议上：
+
+```
+任务状态 = completed
+artifact = 一段问句
+调用方   = 以为干完了，把问句当成果往下传
+```
+
+**这个失败是静默的** —— 没有报错、没有超时，只是错的。比超时难查得多。
+
+#### 解法：显式契约，不做文本猜测
+
+❌ **不要**写「看到 `1) 2) 3)` 就当成选择题」——代码注释、清单、验收项里全是 `1) 2)`。
+
+✅ 桥把一段契约**追加到每个出站 prompt 末尾**（`append_decision_contract`，默认开），
+agent 需要拍板时按格式收尾：
+
+```
+[[NEEDS_DECISION]]
+- <option 1>
+- <option 2>
+RECOMMEND: <copy one option above verbatim>
+REASON: <one short line>
+```
+
+桥解析到之后 → 任务转 **`input-required`**，`pending` 字段带上结构化的：
+
+```json
+{"kind": "decision",
+ "question": "...",
+ "options": ["YAML", "TOML", "JSON"],
+ "recommend": "YAML",
+ "reason": "..."}
+```
+
+`kind` 把两件事分开了 —— 它们的**语义完全不同，不该共用一个字段**：
+
+```
+permission  —— 桥拦下的危险操作，要你放行（ACP 原生支持）
+decision    —— agent 自己拿不准，要你选（ACP 没有这个概念，靠上面的契约）
+```
+
+#### ⚠️ 契约进了 prompt，就会带来【复述误判】
+
+契约跟着 prompt 一起进去了，所以 agent 只要**复述或引用**它，
+标记就会出现 —— **而它根本没在问任何东西。**
+
+反制**不是**加正则，而是**把契约里已经写明的规则变成解析规则**：
+
+```
+契约说 "END your reply with exactly this block, and nothing after it" → 块必须收尾
+契约说 "RECOMMEND: <copy one option above verbatim>"                → 拒绝占位符
+```
+
+于是「复述契约」天然不成立（复述后面还跟着 Rules 那几行）。
+**判据：解析的严格程度必须能从契约本身推出来，而不是靠调参试出来的。**
+
+> 这个 bug 是**测试自己抓出来的**：假后端把收到的 prompt 原样回显，
+> 于是所有本该 `completed` 的任务全跑进了 `input-required`。
+
+#### ⚠️ `inputRequired` 和 `interruptible` 是两件事，别混
+
+| | 含义 | 命令行兜底 |
+|---|---|---|
+| `inputRequired` | 会不会在**回合末尾**停下来等人 | ✅ 会（靠契约） |
+| `interruptible` | 能不能在**执行中途**被拦下 | ❌ 不能（黑盒进程） |
+
+**一个 agent 可以「干完会问你」但「干到一半拦不住」** —— 命令行兜底就是这种。
+混起来会给出错误的适配判断：需要「危险命令先放行」的任务**不能派给它**。
+
 ### 冲突与资源抢占：分片 > 锁
 
 同一 agent 的委托走**单队列**（`runtime/shards.py`），不是靠锁：
