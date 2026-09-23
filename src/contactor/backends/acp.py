@@ -192,6 +192,9 @@ class AcpSession:
             await self.respond(fut._acp_rid, {"outcome": {"outcome": "cancelled"}})
 
 
+FLUSH_CHARS = 512      # 增量 artifact 的攒批阈值（字符）
+
+
 class AcpBackend:
     """name → 一个 AcpSession（懒启动 + 复用）。"""
 
@@ -309,6 +312,14 @@ class AcpBackend:
         fut = self._inflight.get(task.taskId)
         answer_parts: list[str] = []      # ★ 累积答案 → Artifact
         thoughts: list[str] = []          # ★ 累积思路 → Artifact 的 data part
+
+        # ★ 增量推送（2026-09-23 加）：长任务不能等到终点才给产出。
+        #   实测一条 14 分钟的任务，调用方在结束前 artifacts=0，最后一次性收到 9,224 字符。
+        #   这里每攒够 FLUSH_CHARS 就推一段（append=True 续到同一个 artifactId）。
+        aid = uuid.uuid4().hex[:12]
+        pending: list[str] = []
+        since_flush = 0
+        first_flush = True
         while True:
             if fut is not None and fut.done():
                 break
@@ -353,11 +364,21 @@ class AcpBackend:
                 t = self._text_of_content(update.get("content"))
                 if t:
                     answer_parts.append(t)
+                    pending.append(t)
+                    since_flush += len(t)
                     yield TaskEvent(kind="message", taskId=task.taskId,
                                     message=Message(role="agent",
                                                     messageId=uuid.uuid4().hex[:12],
                                                     parts=[Part(kind="text", text=t)],
                                                     taskId=task.taskId))
+                    if since_flush >= FLUSH_CHARS:
+                        yield TaskEvent(kind="artifact", taskId=task.taskId,
+                                        artifact=Artifact(artifactId=aid,
+                                                          name="agent-output",
+                                                          append=not first_flush,
+                                                          parts=[Part(kind="text",
+                                                                      text="".join(pending))]))
+                        pending.clear(); since_flush = 0; first_flush = False
             elif kind == "agent_thought_chunk":
                 t = self._text_of_content(update.get("content"))
                 if t:
@@ -370,18 +391,35 @@ class AcpBackend:
                                  retryable=False, detail=str(resp["error"])[:300])
         stop = (resp.get("result") or {}).get("stopReason", "end_turn")
 
+        # ── 收尾：把剩余文本 + 思路补上 ─────────────────────────────
+        # ⚠️ 2026-09-23 实测踩到：原来用 `if tail and not first_flush / elif answer`
+        #    分支，当「最后一次 flush 之后没有新文本」时 tail 为空 → 掉进 elif answer
+        #    → 又把【全文】当成一个 append=False 的 artifact 发了一遍
+        #    → dispatcher 按新 artifact 收下 → **同一个 artifactId 出现两次**。
+        #    判据：**收尾只补"还没发过的部分"，不能整份重发。**
         answer = "".join(answer_parts).strip()
-        if answer:
-            parts = [Part(kind="text", text=answer)]
-            if thoughts:
-                parts.append(Part(kind="data", data={
-                    "thoughts": "".join(thoughts).strip(),
-                    "stopReason": stop,
-                    "acpSessionId": self._session_by_ctx_hint,
-                }))
+        tail = "".join(pending)
+
+        meta_part = Part(kind="data", data={
+            "thoughts": "".join(thoughts).strip(),
+            "stopReason": stop,
+            "acpSessionId": self._session_by_ctx_hint,
+        }) if thoughts else None
+
+        if not first_flush:
+            # 已经推过增量 → 只补尾巴，**绝不重发全文**
+            parts = ([Part(kind="text", text=tail)] if tail else []) + \
+                    ([meta_part] if meta_part else [])
+            if parts:
+                yield TaskEvent(kind="artifact", taskId=task.taskId,
+                                artifact=Artifact(artifactId=aid, name="agent-output",
+                                                  append=True, parts=parts))
+        elif answer or meta_part:
+            # 一轮下来没超过 FLUSH_CHARS → 和旧行为一致：一个完整 artifact
+            parts = ([Part(kind="text", text=answer)] if answer else []) + \
+                    ([meta_part] if meta_part else [])
             yield TaskEvent(kind="artifact", taskId=task.taskId,
-                            artifact=Artifact(artifactId=uuid.uuid4().hex[:12],
-                                              name="agent-output",
+                            artifact=Artifact(artifactId=aid, name="agent-output",
                                               description=f"{self.name} 的输出（requiresReview=True）",
                                               parts=parts))
 

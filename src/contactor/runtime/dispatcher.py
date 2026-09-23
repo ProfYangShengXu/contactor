@@ -170,7 +170,14 @@ class Dispatcher:
                             return
                     await self._transition(task, ev.state, final=ev.final)
                 elif ev.kind == "artifact" and ev.artifact is not None:
-                    task.artifacts.append(ev.artifact)
+                    self._merge_artifact(task, ev.artifact)
+                    # ★ 必须立刻落盘！
+                    #   2026-09-23 实测踩到：artifact 只改内存，而 store.save() 原本只在
+                    #   _transition / finally 里发生 —— 于是「增量推送」在 turn 结束前
+                    #   **对 tasks/get 完全不可见**（读库读到的还是 artifacts=0）。
+                    #   等于把刚修好的「声明没有读者」换了个形式：产出有了，但没人读得到。
+                    #   教训：**产出侧修好只算一半，可见性要另外验一次。**
+                    await self.store.save(task)
 
                 if ev.message is not None:
                     await self.store.append_message(task.taskId, ev.message)
@@ -221,6 +228,24 @@ class Dispatcher:
         if b is None:
             raise InvalidParams(f"unknown agent: {agent}（已配：{list(self.backends)}）")
         return b
+
+    @staticmethod
+    def _merge_artifact(task: Task, art: Artifact) -> None:
+        """★ append=True = 对【同名 artifact】的增量追加（A2A TaskArtifactUpdateEvent 语义）。
+
+        没有这一层的话，一个 10 分钟以上的任务在结束前拿不到任何产出 ——
+        而 `Artifact.append` 就会退化成一条【没人产出的声明】。
+        （正是 bug 类 ⑪「声明没有读者」：字段在 schema 里，谁都不产它。
+          2026-09-23 实跑一条 14 分钟的任务后才发现的。）
+        """
+        if art.append:
+            for existing in task.artifacts:
+                if existing.artifactId == art.artifactId:
+                    existing.parts.extend(art.parts)
+                    return
+            # 没有同名 artifact 可追加 → 当成新的（别静默丢内容）
+            art.append = False
+        task.artifacts.append(art)
 
     @staticmethod
     def _decision_in(task: Task):

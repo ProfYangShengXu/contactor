@@ -286,6 +286,27 @@ interruptible: false   → ⚠️ 它【在执行中途拦不住】—— 危险
 **`interruptible: false` 的 agent 不能用来做需要逐步放行的任务。**
 命令行兜底 backend 就是这种（见 README）。
 
+### ⚠️ 流只能由【创建者】拿：没有 `tasks/resubscribe`
+
+实时输出只在 `message/stream` 建任务时附赠；**没有“给个 taskId 就能接上去”的接口**。所以：
+
+| 你是谁 | 能看什么 |
+|---|---|
+| 用 `message/stream` 建任务的客户端 | 实时 SSE（含增量 artifact） |
+| 只知道 taskId 的旁观者 / 断线重连的调用方 | **只能轮询 `tasks/get`** |
+
+轮询读库、事件走内存 —— **两者不同步**。中继/重连的调用方在任务结束前看不到中间产出。
+
+> 真需要多观察者时：**要么一开始就用 `message/stream` 拿住那条流，要么接受“只能等终点”。**
+> （已列入“明确不做”，不是漏做。）
+
+### 长任务的产出是【边做边出】的
+
+`artifact` 事件带 `append` 字段：**同一个 `artifactId` 可以多次到达，`append=true` 表示续在已有内容后面。**
+所以别假设“一个 artifact 只出现一次”—— **按 `artifactId` 分组拼**，不是简单覆盖。
+
+（这个字段曾经是死的 —— 声明了但没人产出。详见仓库提交 “Artifact.append 从死字段变成真产出”。）
+
 ### 结果要自己验 —— 桥不替你验
 
 ```
