@@ -192,7 +192,16 @@ class AcpSession:
             await self.respond(fut._acp_rid, {"outcome": {"outcome": "cancelled"}})
 
 
-FLUSH_CHARS = 512      # 增量 artifact 的攒批阈值（字符）
+#: 增量 artifact 的攒批阈值（字符）。
+#:
+#: ⚠️ 两个已知的"拍脑袋"处，改之前先想清楚：
+#:   1) **写放大**：每 flush 一次就 `store.save(task)` 一次，而 save 写的是【整份】
+#:      artifacts JSON → 产出越大、每次写越多，总代价趋近 O(n²)。
+#:      实测 9KB 产出 ≈ 18 次写，可忽略；但 ~1MB 产出就是 ~2000 次 × 越来越大的 JSON。
+#:      真要处理超长产出，应该改成「按字节 or 按时间节流」+ 增量落盘（只 append 新增部分）。
+#:   2) **512 没有依据**：它只保证"短回复不会多出事件"（<512 走老路径，行为不变），
+#:      以及"长任务不至于等 10 分钟什么都看不到"。两个目标都不需要精确值。
+FLUSH_CHARS = 512
 
 
 class AcpBackend:

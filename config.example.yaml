@@ -36,11 +36,11 @@ agents:
         description: 在工作区里跑命令和脚本；越出工作区写文件会要放行
         tags: [shell]
     command: ["wsl", "-d", "Ubuntu", "-u", "root", "--", "bash", "-lc",
-              "cd /root/code/deepseek-harness && exec pnpm dsh --profile acp"]
+              "cd /root/code/<你的 dsh 仓库> && exec pnpm dsh --profile acp"]
     # ⚠️ workspace 必须是【被包装 agent 所在操作系统】的路径。
     #    dsh 跑在 WSL 里 → 给 Linux 路径；给 Windows 路径会得到
     #    -32602 "cwd must be an absolute path"
-    workspace: "/root/code/deepseek-harness"
+    workspace: "/root/code/<你的 dsh 仓库>"
 
   hermes:
     kind: acp
